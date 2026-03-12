@@ -1,13 +1,9 @@
-using JuMP, Ipopt, HiGHS, Gurobi
+# Optimization Problem Structure
+using JuMP, DiffOpt, Ipopt
 
-function monolithic_formulation()
-    
-end
+# Surrogate Model Architecture
+using Flux
 
-function NLP_formulation()
-    
-end
-
-function MILP_formulation()
-    
-end
+"""
+Here is where we will maintain the problem structure and the core functions to running this problem.
+"""
