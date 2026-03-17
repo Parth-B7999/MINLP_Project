@@ -91,7 +91,7 @@ end
 # end
 
 
-function _add_acuc_var_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_acuc_var_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     """
     Adds mulit-period ACUC variables
     """
@@ -114,7 +114,7 @@ function _add_acuc_var_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{A
     @variable(model, q_to[keys(branches), T])
 end
 
-function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     """
     Adds multi-period ACUC variables for rectangular coords
     """
@@ -159,7 +159,7 @@ end
 # end
 
 
-function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     """
     Add min cost objective function for mp-ac-uc-opf
     """
@@ -173,10 +173,10 @@ function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Any}
         gens[i]["cost"][1] * model[:pg][i, t]^2 + 
         gens[i]["cost"][2] * model[:pg][i, t] + 
         gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)
-        )) for t in T)
+        ) for t in T))
 end
 
-function _add_ref_limits_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_ref_limits_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     # buses, _, _, _ = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
@@ -187,7 +187,7 @@ function _add_ref_limits_polar!(model::JuMP.Model, data::MatpowerData, T::Vector
     end
 end
 
-function _add_ref_limits_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_ref_limits_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     ref_buses = [k for (k,v) in data.buses if v["bus_type"] == 3]
     for t in T, i in ref_buses
         @constraint(model, model[:vi][i, t] == 0.0)
@@ -195,21 +195,21 @@ function _add_ref_limits_rectangular!(model::JuMP.Model, data::MatpowerData, T::
     end
 end
 
-function _add_gen_limits!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_gen_limits!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     
     # _, gens, _, _ = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
     # Generator Operational Limits tied to Commitment Status
     for t in T, (i, gen) in gens
-        @constraint(model, model[:pg][i][t] >= gen["pmin"] * model[:u][i][t])
-        @constraint(model, model[:pg][i][t] <= gen["pmax"] * model[:u][i][t])
-        @constraint(model, model[:qg][i][t] >= gen["qmin"] * model[:u][i][t])
-        @constraint(model, model[:qg][i][t] <= gen["qmax"] * model[:u][i][t])
+        @constraint(model, model[:pg][i,t] >= gen["pmin"] * model[:u][i,t])
+        @constraint(model, model[:pg][i,t] <= gen["pmax"] * model[:u][i,t])
+        @constraint(model, model[:qg][i,t] >= gen["qmin"] * model[:u][i,t])
+        @constraint(model, model[:qg][i,t] <= gen["qmax"] * model[:u][i,t])
     end
 end
 
-function _add_polar_branchflow!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_polar_branchflow!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     """
     Add branch flows in polar coordinates
     """
@@ -229,31 +229,31 @@ function _add_polar_branchflow!(model::JuMP.Model, data::MatpowerData, T::Vector
         tm = branch["tap"]
         
         # From-side flows
-        @NLconstraint(model, model[:p_fr][i] ==  (g + g_fr)/tm^2 * model[:vm][f_bus]^2 + 
-            (-g*tr + b*ti)/tm^2 * (model[:vm][f_bus] * model[:vm][t_bus] * cos(model[:va][f_bus] - model[:va][t_bus])) + 
-            (-b*tr - g*ti)/tm^2 * (model[:vm][f_bus] * model[:vm][t_bus] * sin(model[:va][f_bus] - model[:va][t_bus])))
+        @NLconstraint(model, model[:p_fr][i,t] ==  (g + g_fr)/tm^2 * model[:vm][f_bus,t]^2 + 
+            (-g*tr + b*ti)/tm^2 * (model[:vm][f_bus,t] * model[:vm][t_bus,t] * cos(model[:va][f_bus,t] - model[:va][t_bus,t])) + 
+            (-b*tr - g*ti)/tm^2 * (model[:vm][f_bus,t] * model[:vm][t_bus,t] * sin(model[:va][f_bus,t] - model[:va][t_bus,t])))
             
-        @NLconstraint(model, model[:q_fr][i] == -(b + b_fr)/tm^2 * model[:vm][f_bus]^2 - 
-            (-b*tr - g*ti)/tm^2 * (model[:vm][f_bus] * model[:vm][t_bus] * cos(model[:va][f_bus] - model[:va][t_bus])) + 
-            (-g*tr + b*ti)/tm^2 * (model[:vm][f_bus] * model[:vm][t_bus] * sin(model[:va][f_bus] - model[:va][t_bus])))
+        @NLconstraint(model, model[:q_fr][i,t] == -(b + b_fr)/tm^2 * model[:vm][f_bus,t]^2 - 
+            (-b*tr - g*ti)/tm^2 * (model[:vm][f_bus,t] * model[:vm][t_bus,t] * cos(model[:va][f_bus,t] - model[:va][t_bus,t])) + 
+            (-g*tr + b*ti)/tm^2 * (model[:vm][f_bus,t] * model[:vm][t_bus,t] * sin(model[:va][f_bus,t] - model[:va][t_bus,t])))
 
         # To-side flows
-        @NLconstraint(model, model[:p_to][i] ==  (g + g_to) * model[:vm][t_bus]^2 + 
-            (-g*tr - b*ti)/tm^2 * (model[:vm][t_bus] * model[:vm][f_bus] * cos(model[:va][t_bus] - model[:va][f_bus])) + 
-            (-b*tr + g*ti)/tm^2 * (model[:vm][t_bus] * model[:vm][f_bus] * sin(model[:va][t_bus] - model[:va][f_bus])))
+        @NLconstraint(model, model[:p_to][i,t] ==  (g + g_to) * model[:vm][t_bus,t]^2 + 
+            (-g*tr - b*ti)/tm^2 * (model[:vm][t_bus,t] * model[:vm][f_bus,t] * cos(model[:va][t_bus,t] - model[:va][f_bus,t])) + 
+            (-b*tr + g*ti)/tm^2 * (model[:vm][t_bus,t] * model[:vm][f_bus,t] * sin(model[:va][t_bus,t] - model[:va][f_bus,t])))
             
-        @NLconstraint(model, model[:q_to][i] == -(b + b_to) * model[:vm][t_bus]^2 - 
-            (-b*tr + g*ti)/tm^2 * (model[:vm][t_bus] * model[:vm][f_bus] * cos(model[:va][t_bus] - model[:va][f_bus])) + 
-            (-g*tr - b*ti)/tm^2 * (model[:vm][t_bus] * model[:vm][f_bus] * sin(model[:va][t_bus] - model[:va][f_bus])))
+        @NLconstraint(model, model[:q_to][i,t] == -(b + b_to) * model[:vm][t_bus,t]^2 - 
+            (-b*tr + g*ti)/tm^2 * (model[:vm][t_bus,t] * model[:vm][f_bus,t] * cos(model[:va][t_bus,t] - model[:va][f_bus,t])) + 
+            (-g*tr - b*ti)/tm^2 * (model[:vm][t_bus,t] * model[:vm][f_bus,t] * sin(model[:va][t_bus,t] - model[:va][f_bus,t])))
             
         # Thermal Limits
-        @constraint(model, model[:p_fr][i]^2 + model[:q_fr][i]^2 <= branch["rate_a"]^2)
-        @constraint(model, model[:p_to][i]^2 + model[:q_to][i]^2 <= branch["rate_a"]^2)
+        @constraint(model, model[:p_fr][i,t]^2 + model[:q_fr][i,t]^2 <= branch["rate_a"]^2)
+        @constraint(model, model[:p_to][i,t]^2 + model[:q_to][i,t]^2 <= branch["rate_a"]^2)
     end
 end
 
 
-function _add_rectangular_branchflow!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_rectangular_branchflow!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     for t in T, (i, branch) in data.branches
         f_bus = string(branch["f_bus"])
         t_bus = string(branch["t_bus"])
@@ -298,7 +298,7 @@ function _add_rectangular_branchflow!(model::JuMP.Model, data::MatpowerData, T::
 end
 
 
-function _add_node_bal!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
+function _add_node_bal_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
 
     # buses, gens, branches, loads, shunts = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
@@ -336,6 +336,44 @@ function _add_node_bal!(model::JuMP.Model, data::MatpowerData, T::Vector{Any})
 end
 
 
+function _add_node_bal_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
+
+    # buses, gens, branches, loads, shunts = _unpack_matpowerdata(data)
+    buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
+
+    # Nodal Power Balance (Kirchhoff's Current Law)
+    for t in T, (i, bus) in buses
+        # Find all components connected to this bus
+        bus_loads = [l for (k,l) in loads if string(l["load_bus"]) == i]
+        bus_gens = [k for (k,g) in gens if string(g["gen_bus"]) == i]
+        br_fr = [k for (k,b) in branches if string(b["f_bus"]) == i]
+        br_to = [k for (k,b) in branches if string(b["t_bus"]) == i]
+
+        pd = sum(l["pd"] for l in bus_loads; init=0.0)
+        qd = sum(l["qd"] for l in bus_loads; init=0.0)
+        
+        local gs
+        local bs
+        # println(shunts[i])
+        if haskey(shunts, i) # if there exists gs, bs
+            println(shunts[i])
+            gs = shunts[i]["gs"]; bs = shunts[i]["bs"]
+        else
+            gs = 0; bs = 0
+        end
+
+        @constraint(model, 
+            sum(model[:pg][g, t] for g in bus_gens; init=0.0) - pd - gs * (model[:vr][i, t]^2 + model[:vi][i, t]^2) == 
+            sum(model[:p_fr][b, t] for b in br_fr; init=0.0) + sum(model[:p_to][b, t] for b in br_to; init=0.0)
+        )
+        @constraint(model, 
+            sum(model[:qg][g, t] for g in bus_gens; init=0.0) - qd + bs * (model[:vr][i, t]^2 + model[:vi][i, t]^2) == 
+            sum(model[:q_fr][b, t] for b in br_fr; init=0.0) + sum(model[:q_to][b, t] for b in br_to; init=0.0)
+        )
+    end
+end
+
+
 function build_single_period_ac_uc_polar(file_path::String)
     
     data = _parse_file_data(file_path)
@@ -364,7 +402,7 @@ function build_single_period_ac_uc_polar(file_path::String)
 
     _add_polar_branchflow!(model, data, [1])
 
-    _add_node_bal!(model, data, T)
+    _add_node_bal_polar!(model, data, T)
 
     return model
 end
@@ -386,7 +424,7 @@ function build_single_period_ac_uc_rectangular(file_path::String)
     model = Model(Gurobi.Optimizer)
 
     # Add variables 
-    _add_acuc_var_polar!(model, data, T)
+    _add_acuc_var_rectangular!(model, data, T)
 
     # Add objective
     _add_mincost_obj!(model, data, T)
@@ -398,7 +436,7 @@ function build_single_period_ac_uc_rectangular(file_path::String)
 
     _add_rectangular_branchflow!(model, data, T)
 
-    _add_node_bal!(model, data, T)
+    _add_node_bal_rectangular!(model, data, T)
 
     return model
 end
@@ -407,7 +445,7 @@ end
 # function build_multi_period_ac_uc(file_path::String, demand_curve::Vector{Real})
 #     """
 #     * file_path::String : path to the .m file containing the OPF data
-#     * demand_curve::Vector{Any} : vector to define the scaled baseline demand to generate a demand curve
+#     * demand_curve::Vector{Int64} : vector to define the scaled baseline demand to generate a demand curve
 #     Akin to ExaModelsPower.jl
 #     """
     
