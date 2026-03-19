@@ -1,0 +1,135 @@
+\documentclass[11pt,twoside]{article}
+
+\addtolength{\textwidth}{0.5in}
+\usepackage{epsfig,amsfonts,color}
+%\usepackage[leqno]{amsmath}
+\usepackage{amsmath}
+\usepackage{optidef}
+%\usepackage{showlabels}
+\newcommand{\norm}[1]{\left| \left| #1 \right| \right|}
+\newcommand{\mods}[1]{\left|  #1 \right|}
+\newcommand{\cm}[1]{{\color{black} #1}}
+\newcommand{\cv}[1]{{\color{black} #1}}
+\usepackage{amssymb, palatino, geometry,url}
+\usepackage{algorithmic}
+\usepackage{subcaption}
+\usepackage{graphicx}
+\graphicspath{ {./Figures/} }
+\usepackage{longtable}
+\usepackage[section]{placeins}
+\usepackage[noresetcount,lined,boxed]{algorithm2e} % ... for algorithms
+\newcommand{\mynote}[1]{{ \color{black}{#1}}}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+%\usepackage{cite}
+
+\usepackage{indentfirst}
+\usepackage{parskip}
+\setlength{\parindent}{12pt}
+
+\makeatletter
+\newcommand{\nocaption}{\addtocounter{\@captype}{-1}} 
+% stop counting the figure numbering when having no caption command
+\makeatother
+\pagenumbering{arabic}
+
+\geometry{letterpaper,
+	left       = 0.9in,
+	right      = 0.9in,
+	top        = 0.9in,
+	bottom     = 0.9in}
+\linespread{1.2}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+
+
+\newtheorem{assumption}{Assumption}
+% ... number equations within sections
+\renewcommand{\theequation}{\thesection.\arabic{equation}}
+
+% ... mathematical symbols / macros
+\newcommand{\R}{\mbox{I}\!\mbox{R}}
+\newcommand{\Tau}{\mathcal{T}}
+\newcommand{\C}{\mbox{I}\hspace{-0.5em}\mbox{C}}
+%\newcommand{\mini}{\mathop{\mbox{minimize}}}
+%\newcommand{\maxi}{\mathop{\mbox{maximize}}}
+\newcommand{\amin}{\mathop{\mbox{argmin}}}
+\newcommand{\amax}{\mathop{\mbox{argmax}}}
+\newcommand{\st}{\mbox{subject to }}
+\newcommand{\bmath}[1]{\mbox{\boldmath $ #1 $}}
+\newcommand{\be}{\begin{equation}}
+	\newcommand{\ee}{\end{equation}}
+\newcommand{\bea}{\begin{eqnarray}}
+	\newcommand{\eea}{\end{eqnarray}}
+\newcommand{\dps}{\displaystyle}
+\newcommand{\mbs}[1]{\mbox{\scriptsize #1}}
+\newcommand{\pref}[1]{(\ref{#1})}
+\newcommand{\bvec}{\left(\begin{array}{c}}
+	\newcommand{\evec}{\end{array}\right)}
+\newcommand{\bsub}{\begin{subequations}}
+	\newcommand{\esub}{\end{subequations}}
+\newcommand{\Model}{{\cal M}}
+\newcommand{\ModelTLM}{{\mathbf{M}}}
+\newcommand{\ModelADJ}{{\mathbf{M}^T}}
+\newcommand{\ModelCovMat}{\mathbf{Q}}
+\newcommand{\CholeskyMatrix}{\mathbf{L}}
+
+\newcommand{\ti}{{t_0}}
+\newcommand{\tf}{{t_F}}
+\newcommand{\tk}[1]{{t_{#1}}}
+\newcommand{\xnarr}{{x_{\scriptscriptstyle{\rm{NARR}}}}}
+
+\newcommand{\CostFcn}{{\Psi}}
+\newcommand{\SampleVarMat}{{\mathbf{S}^2}}
+\newcommand{\VarMat}{\mathbf{D}}
+\newcommand{\CorMat}{\mathbf{C}}
+\newcommand{\CovMat}{\mathbf{V}}
+\newcommand{\Avg}{\mu}
+\newcommand{\NEnsembleWindows}{N}
+\newcommand{\NEnsembleMembers}{{N_{S}}}
+\newcommand{\NState}{M_x}
+\newcommand{\NSteps}{m}
+\newcommand{\Expect}[1]{\overline{#1}}
+\newcommand{\mean}{{\rm mean}}
+\usepackage{lineno}
+\linenumbers
+
+
+\begin{document}
+	
+\title{MINLP Project}
+
+\author{Parth Brahmbhatt, Kiernan Jennings\\
+	{\small Department of Chemical and Biological Engineering}\\
+	{\small \;University of Wisconsin, 1415 Engineering Dr, Madison, WI 53706, USA}}
+\date{}
+\maketitle
+	
+	
+\section{Maths}
+
+We are trying to learn the following convex MIQCQP:
+\begin{equation}
+	\begin{aligned}
+		P(u) = \quad & \min_{x} & & c(u)^\top x \\
+		& \text{s.t.} & & x^\top Q(u) x + r(u)^\top x \leq 0 \\
+		&&& Q(u) \succeq 0 \\
+		&&& x \in \mathbb{R}^m \times \mathbb{Z}^{n-m}	
+	\end{aligned}
+\end{equation}
+
+
+Using the following surrogate (convex?) QCQP:
+\begin{equation}
+	\begin{aligned}
+		\hat{P}(u,\theta) = \quad & \min_{x} & & c(u)^\top x \\
+		& \text{s.t.} & & x^\top Q(u) x + r(u)^\top x \leq 0 \\
+		&&& x^\top \tilde{Q}(u,\theta) x + \tilde{r}(u,\theta)^\top x \leq 0 \\
+		&&& Q(u) \succeq 0 \\
+		&&& x \in \mathbb{R}^n
+	\end{aligned}
+\end{equation}
+
+
+
+\end{document}
