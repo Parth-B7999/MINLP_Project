@@ -112,7 +112,7 @@ We are trying to learn the following convex MIQCQP:
 \begin{equation}
 	\begin{aligned}
 		P(u) = \quad & \min_{x} & & c(u)^\top x \\
-		& \text{s.t.} & & x^\top Q(u) x + r(u)^\top x \leq 0 \\
+		& \text{s.t.} & & x^\top Q(u) x + R(u)^\top x \leq 0 \\
 		&&& Q(u) \succeq 0 \\
 		&&& x \in \mathbb{R}^m \times \mathbb{Z}^{n-m}	
 	\end{aligned}
@@ -123,8 +123,9 @@ Using the following surrogate (convex?) QCQP:
 \begin{equation}
 	\begin{aligned}
 		\hat{P}(u,\theta) = \quad & \min_{x} & & c(u)^\top x \\
-		& \text{s.t.} & & x^\top Q(u) x + r(u)^\top x \leq 0 \\
-		&&& x^\top \tilde{Q}(u,\theta) x + \tilde{r}(u,\theta)^\top x \leq 0 \\
+		& \text{s.t.} & & x^\top Q(u) x + R(u)^\top x \leq 0 \\
+		&&& \tilde{A} x \leq \tilde{b} \\
+%		&&& x^\top \tilde{Q}(u,\theta) x + \tilde{R}(u,\theta)^\top x \leq 0 \\   
 		&&& Q(u) \succeq 0 \\
 		&&& x \in \mathbb{R}^n
 	\end{aligned}

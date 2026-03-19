@@ -45,51 +45,6 @@ function _parse_file_data(file_path::String)::MatpowerData
     return MatpowerData(data["bus"], data["gen"], data["branch"], data["load"], get(data, "shunt", Dict{String, Any}()))
 end
 
-# function _unpack_matpowerdata(data::MatpowerData)
-#     buses = data.buses
-#     gens = data.gens
-#     branches = data.branches
-#     loads = data.loads
-#     shunts = data.shunts
-#     # return buses, gens, branches, loads
-# end
-
-# function _unpack_matpowerdatashunt(data::MatpowerDataShunt)
-#     buses = data.buses
-#     gens = data.gens
-#     branches = data.branches
-#     loads = data.loads
-#     shunts = data.shunts
-
-#     return buses, gens, branches, loads, shunts
-# end
-
-
-
-# function _add_acuc_var_polar!(model::JuMP.Model, data::MatpowerData)
-#     """
-#     Adds single period ACUC variables
-#     If mp == true, add multi-period OPF formulation variables
-#     """
-#     # single period opf
-#     # buses, gens, branches, _ = _unpack_matpowerdata(data)
-#     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
-
-#     # 3. Define Variables
-#     @variable(model, va[keys(buses)]) # Voltage angle
-#     @variable(model, buses[i]["vmin"] <= vm[i in keys(buses)] <= buses[i]["vmax"]) # Voltage magnitude
-    
-#     @variable(model, u[keys(gens)], Bin) # UNIT COMMITMENT: Binary status
-#     @variable(model, pg[keys(gens)])     # Active power generation
-#     @variable(model, qg[keys(gens)])     # Reactive power generation
-
-#     # Branch flow variables (from and to ends)
-#     @variable(model, p_fr[keys(branches)])
-#     @variable(model, q_fr[keys(branches)])
-#     @variable(model, p_to[keys(branches)])
-#     @variable(model, q_to[keys(branches)])
-# end
-
 
 function _add_acuc_var_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     """
@@ -147,9 +102,6 @@ function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Int6
     """
     Add min cost objective function for mp-ac-uc-opf
     """
-
-
-    # _, gens, _, _ = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
 
@@ -482,83 +434,4 @@ function mp_ac_uc(file_path::String, demand_curve::Vector{Float64}, type="Rectan
         return build_mp_ac_uc_polar(file_path, demand_curve)
     end
 end
-
-# function build_multi_period_ac_uc(file_path::String, demand_curve::Vector{Real})
-#     """
-#     * file_path::String : path to the .m file containing the OPF data
-#     * demand_curve::Vector{Int64} : vector to define the scaled baseline demand to generate a demand curve
-#     Akin to ExaModelsPower.jl
-#     """
-    
-    
-#     data = PowerModels.parse_file(file_path)
-#     PowerModels.standardize_cost_terms!(data, order=2)
-#     PowerModels.calc_thermal_limits!(data)
-
-#     # Injecting dummy UC parameters since standard .m files lack them
-#     for (i, gen) in data["gen"]
-#         gen["ramp_up"] = gen["pmax"] * 0.3    # Can ramp 30% of max capacity per hour
-#         gen["ramp_down"] = gen["pmax"] * 0.3
-#         gen["startup_cost"] = 500.0
-#     end
-
-#     T = length(demand_curve)
-
-#     model = Model()
-#     buses = data["bus"]; gens = data["gen"]; branches = data["branch"]; loads = data["load"]
-
-#     # --- Time-Indexed Variables ---
-#     @variable(model, va[keys(buses), 1:T]) 
-#     @variable(model, buses[i]["vmin"] <= vm[i in keys(buses), t in 1:T] <= buses[i]["vmax"])
-    
-#     @variable(model, u[keys(gens), 1:T], Bin) # On/Off status
-#     @variable(model, v[keys(gens), 1:T], Bin) # Startup status
-#     @variable(model, w[keys(gens), 1:T], Bin) # Shutdown status
-    
-#     @variable(model, pg[keys(gens), 1:T])
-#     @variable(model, qg[keys(gens), 1:T])
-
-#     @variable(model, p_fr[keys(branches), 1:T])
-#     @variable(model, q_fr[keys(branches), 1:T])
-#     @variable(model, p_to[keys(branches), 1:T])
-#     @variable(model, q_to[keys(branches), 1:T])
-
-#     # --- Objective (Includes startup costs) ---
-#     @objective(model, Min, sum(
-#         sum(gens[i]["cost"][1] * pg[i, t]^2 + 
-#             gens[i]["cost"][2] * pg[i, t] + 
-#             gens[i]["cost"][3] * u[i, t] + 
-#             gens[i]["startup_cost"] * v[i, t] for i in keys(gens)) 
-#         for t in 1:T
-#     ))
-
-#     # --- Constraints ---
-#     for t in 1:T
-#         # 1. Network Physics (AC flows & Nodal Balance) for each time period
-#         # (This uses the exact same logic as Part 1, just adding the `t` index)
-#         # For brevity in this block, assume the same KCL and AC flow equations as above, 
-#         # but applied to va[i, t], vm[i, t], pg[i, t], etc.
-        
-#         for (i, gen) in gens
-#             # 2. Generator Limits
-#             @constraint(model, pg[i, t] >= gen["pmin"] * u[i, t])
-#             @constraint(model, pg[i, t] <= gen["pmax"] * u[i, t])
-
-#             # 3. Inter-temporal UC Logic (Ramping & State tracking)
-#             if t > 1
-#                 # Logical relationship between state, startup, and shutdown
-#                 @constraint(model, u[i, t] - u[i, t-1] == v[i, t] - w[i, t])
-                
-#                 # Ramping Limits
-#                 @constraint(model, pg[i, t] - pg[i, t-1] <= gen["ramp_up"] * u[i, t-1] + gen["pmin"] * v[i, t])
-#                 @constraint(model, pg[i, t-1] - pg[i, t] <= gen["ramp_down"] * u[i, t] + gen["pmin"] * w[i, t])
-#             else
-#                 # Initial condition (Assuming all generators start OFF at t=0 for simplicity)
-#                 @constraint(model, u[i, t] == v[i, t])
-#             end
-#         end
-#     end
-
-#     return model, data
-# end
 
