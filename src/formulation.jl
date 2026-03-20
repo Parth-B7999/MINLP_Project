@@ -50,6 +50,14 @@ function mp_ac_uc(file_path::String, demand_curve::Vector{Float64}, type="Rectan
     end
 end
 
+function convex_ac_uc(file_path::String, params)
+    """
+    * file_path: string going to the .m file for the IEEE library
+    * params: Dict that contains the parameters that we are training on: loads and base voltages
+    """
+
+end
+
 function build_single_period_ac_uc_polar(file_path::String)    
     data = _parse_file_data(file_path)
     T = [1]
@@ -154,7 +162,7 @@ function build_single_ac_uc_rectangular(file_path::String)
 
 end
 
-function build_convex_ac_uc(file_path::String, node_vr, node_vi)
+function build_convex_ac_uc(file_path::String, node_vr, node_vi, node_pd=nothing, node_qd=nothing)
     """
     Using Constante-Flores and Li 2026 convex QCQP approximation of ACPF
     The reformulation comes from: 
@@ -164,6 +172,7 @@ function build_convex_ac_uc(file_path::String, node_vr, node_vi)
 
     * node_vr - dictionary that contains previous real voltage information for each bus
     * node_vi - dictionary that contains previous imaginary voltage information for each bus
+    * 
     """
     data = _parse_file_data(file_path)
     T = [1]
@@ -172,15 +181,16 @@ function build_convex_ac_uc(file_path::String, node_vr, node_vi)
     model = Model(Gurobi.Optimizer)
 
     # Add variables 
-    _add_acuc_var_rectangular!(model, data, T, true)
+    _add_acuc_var_rectangular!(model, data, T, convex=true)
     _add_convex_constraints!(model, data, T, node_vr, node_vi)
 
     # Add objective
-    _add_mincost_obj!(model, data, T)
+    _add_mincost_obj!(model, data, T, convex=true)
     # Add constraints
     _add_ref_limits_rectangular!(model, data, T) 
     _add_gen_limits!(model, data, T)
     _add_rectangular_branchflow!(model, data, T)
+    param_loads = Dict("pd" => node_pd, "qd" => node_qd)
     _add_node_bal_rectangular!(model, data, T)
 
     return model
@@ -241,7 +251,7 @@ function _get_edges(data::MatpowerData)
     return edges
 end
 
-function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}, convex::Bool=false)
+function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false)
     """
     Rectangular power voltage W-matrix style formulation
     """
@@ -299,7 +309,7 @@ function _add_convex_constraints!(model::JuMP.Model, data::MatpowerData, T::Vect
 
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
     edges = _get_edges(data) # vector of tuples listing the connections
-    
+
     @variable(model, xi_c[i in keys(buses),T] >= 0) # slack, 4h
     @variable(model, xij_c[e in edges,T] >= 0) # slack, 4i
     @variable(model, xij_s[e in edges,T] >= 0) # slack, 4j
@@ -338,19 +348,31 @@ function _add_convex_constraints!(model::JuMP.Model, data::MatpowerData, T::Vect
 
 end
 
-function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
+function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false)
     """
     Add min cost objective function for mp-ac-uc-opf
     """
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
-
-    @objective(model, Min, sum( sum(
-        gens[i]["cost"][1] * model[:pg][i, t]^2 + 
-        gens[i]["cost"][2] * model[:pg][i, t] + 
-        gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)
-        ) for t in T))
+    if convex
+        edges = _get_edges(data)
+        @objective(model, Min, sum( sum(
+            gens[i]["cost"][1] * model[:pg][i, t]^2 + 
+            gens[i]["cost"][2] * model[:pg][i, t] + 
+            gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)) + sum(
+            model[:xi_c][i,t] for i in keys(buses)) + sum(model[:xij_c][e,t] + model[:xij_s][e,t]
+            for e in edges)
+            for t in T) 
+            )
+    else
+        @objective(model, Min, sum( sum(
+            gens[i]["cost"][1] * model[:pg][i, t]^2 + 
+            gens[i]["cost"][2] * model[:pg][i, t] + 
+            gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)
+            ) for t in T))
+    end
 end
+
 
 function _add_ref_limits_polar!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
     # buses, _, _, _ = _unpack_matpowerdata(data)
@@ -514,8 +536,7 @@ function _add_node_bal_polar!(model::JuMP.Model, data::MatpowerData, demand_curv
 end
 
 
-function _add_node_bal_rectangular!(model::JuMP.Model, data::MatpowerData, demand_curve::Vector{Int64})
-
+function _add_node_bal_rectangular!(model::JuMP.Model, data::MatpowerData, demand_curve::Vector{Int64}; param_loads=nothing)
     # buses, gens, branches, loads, shunts = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
@@ -527,9 +548,15 @@ function _add_node_bal_rectangular!(model::JuMP.Model, data::MatpowerData, deman
         br_fr = [k for (k,b) in branches if string(b["f_bus"]) == i]
         br_to = [k for (k,b) in branches if string(b["t_bus"]) == i]
 
-        pd = sum(l["pd"] for l in bus_loads; init=0.0)*val
-        qd = sum(l["qd"] for l in bus_loads; init=0.0)*val
 
+        if isnothing(param_loads)
+            pd = sum(l["pd"] for l in bus_loads; init=0.0)*val
+            qd = sum(l["qd"] for l in bus_loads; init=0.0)*val
+        else
+            pd = param_loads["pd"][i]
+            qd = param_loads["qd"][i]
+        end
+        
         gs = get(bus, "gs", 0.0) + sum(get(s, "gs", 0.0) for (k,s) in shunts if string(s["shunt_bus"]) == i; init=0.0)
         bs = get(bus, "bs", 0.0) + sum(get(s, "bs", 0.0) for (k,s) in shunts if string(s["shunt_bus"]) == i; init=0.0)
 
