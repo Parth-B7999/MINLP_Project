@@ -154,7 +154,7 @@ function build_single_ac_uc_rectangular(file_path::String)
 
 end
 
-function build_convex_ac_uc(file_path::String)
+function build_convex_ac_uc(file_path::String, node_voltages)
     """
     Using Constante-Flores and Li 2026 convex QCQP approximation of ACPF
     The reformulation comes from: 
@@ -162,7 +162,25 @@ function build_convex_ac_uc(file_path::String)
     c_ij = vi_i vi_j + vr_i vr_j forall i,j in E (1m)
     s_ij = vr_i vi_j - vr_j vi_i forall i,j in E (1n)
     """
-    
+    data = _parse_file_data(file_path)
+    T = [1]
+
+    # Initialize the JuMP Model
+    model = Model(Gurobi.Optimizer)
+
+    # Add variables 
+    _add_acuc_var_rectangular!(model, data, T, true)
+    _add_convex_constraints!(model, data, T, node_voltages)
+
+    # Add objective
+    _add_mincost_obj!(model, data, T)
+    # Add constraints
+    _add_ref_limits_rectangular!(model, data, T) 
+    _add_gen_limits!(model, data, T)
+    _add_rectangular_branchflow!(model, data, T)
+    _add_node_bal_rectangular!(model, data, T)
+
+    return model
 end
 
 
@@ -207,39 +225,39 @@ function _get_edges(data::MatpowerData)
     return edges
 end
 
-function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
+function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}, convex::Bool=false)
     """
     Rectangular power voltage W-matrix style formulation
     """
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
     # 3. Define Variables
-    @variable(model, vr[i in keys(data.buses), T]) # real voltage
-    @variable(model, vi[i in keys(data.buses), T]) # imaginary voltage
-    @variable(model, c_ii[i in keys(data.buses), T])
+    @variable(model, vr[i in keys(buses), T]) # real voltage
+    @variable(model, vi[i in keys(buses), T]) # imaginary voltage
+    @variable(model, c_ii[i in keys(buses), T])
 
     edges = _get_edges(data) # vector of tuples listing the connections
 
-    for (i, bus) in data.buses
-        @constraint(model, [t in T], model[:c_ii][i,t] == model[:vr][i,t]^2 + model[:vi][i,t]^2)
-        @constraint(model, [t in T], bus["vmin"]^2 <= model[:c_ii][i,t] <= bus["vmax"]^2)
-    end
+    @constraint(model, [t in T], bus["vmin"]^2 <= model[:c_ii][i,t] <= bus["vmax"]^2) #1i
     
     # for (i, j) in edges
         # define only for edges
     @variable(model, c_ij[e in edges,T])
     @variable(model, s_ij[e in edges,T])
 
-    for (i,j) in edges
-        # define eq. constraints for cij, sij
-        e = (i,j)
-        i = string(i); j = string(j)
-        @constraint(model, [t in T], model[:c_ij][e,t] == model[:vr][i,t]*model[:vr][j,t] + model[:vi][i,t]*model[:vi][j,t]) # "4" not found
-        @constraint(model, [t in T], model[:s_ij][e,t] == model[:vr][i,t]*model[:vi][j,t] - model[:vr][j,t]*model[:vi][i,t])
-        # data.branches["#"]["f_bus"] = i
-        # data.branches["#"]["t_bus"] = j
+    if !convex
+        for (i, bus) in buses
+            @constraint(model, [t in T], model[:c_ii][i,t] == model[:vr][i,t]^2 + model[:vi][i,t]^2) #1l           
+        end
+
+        for (i,j) in edges
+            # define eq. constraints for cij, sij
+            e = (i,j)
+            i = string(i); j = string(j)
+            @constraint(model, [t in T], model[:c_ij][e,t] == model[:vr][i,t]*model[:vr][j,t] + model[:vi][i,t]*model[:vi][j,t]) # 1m
+            @constraint(model, [t in T], model[:s_ij][e,t] == model[:vr][i,t]*model[:vi][j,t] - model[:vr][j,t]*model[:vi][i,t]) # 1n
+        end
     end
-    
     
     @variable(model, u[keys(gens), T], Bin) # UNIT COMMITMENT: Binary status
     @variable(model, pg[keys(gens), T])     # Active power generation
@@ -252,69 +270,34 @@ function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Ve
     @variable(model, q_to[keys(branches), T])
 end
 
-function _add_acuc_var_convex!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
-    """
-    Adjusting the following:
-    c_ii = vr^2 + vi^2 forall n (1l)
-    c_ij = vi_i vi_j + vr_i vr_j forall i,j in E (1m)
-    s_ij = vr_i vi_j - vr_j vi_i forall i,j in E (1n)
-    """
-    buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
-
-    # 3. Define Variables
-    @variable(model, vr[i in keys(data.buses), T]) # real voltage
-    @variable(model, vi[i in keys(data.buses), T]) # imaginary voltage
-    @variable(model, c_ii[i in keys(data.buses), T])
-
-    @variable(model, xi_c[i in keys(data.buses),T] >= 0) # slack
-
-    edges = _get_edges(data) # vector of tuples listing the connections
-
-    for (i, bus) in data.buses
-        @constraint(model, [t in T], model[:c_ii][i,t] == model[:vr][i,t]^2 + model[:vi][i,t]^2)
-        @constraint(model, [t in T], bus["vmin"]^2 <= model[:c_ii][i,t] <= bus["vmax"]^2) # 1i
-
-        @constraint(model, [t in T], model[:c_ii][i, t] >= model[:vr][i,t]^2 + model[:vi][i,t]^2) #4b
-        @constraint(model, [t in T], )
-    end
-    
-    # for (i, j) in edges
-        # define only for edges
-    @variable(model, c_ij[e in edges,T])
-    @variable(model, s_ij[e in edges,T])
-    @variable(model, xij_c[e in edges,T] >= 0) # slack
-    @variable(model, xij_s[e in edges,T] >= 0) # slack
-
-    for (i,j) in edges
-        # define eq. constraints for cij, sij
-        e = (i,j)
-        i = string(i); j = string(j)
-        # @constraint(model, [t in T], model[:c_ij][e,t] == model[:vr][i,t]*model[:vr][j,t] + model[:vi][i,t]*model[:vi][j,t]) # "4" not found
-        # @constraint(model, [t in T], model[:s_ij][e,t] == model[:vr][i,t]*model[:vi][j,t] - model[:vr][j,t]*model[:vi][i,t])
-        # @constraint(model, [t in T], )
-    end
- 
-    @variable(model, u[keys(gens), T], Bin) # UNIT COMMITMENT: Binary status
-    @variable(model, pg[keys(gens), T])     # Active power generation
-    @variable(model, qg[keys(gens), T])     # Reactive power generation
-
-    # Branch flow variables (from and to ends)
-    @variable(model, p_fr[keys(branches), T])
-    @variable(model, q_fr[keys(branches), T])
-    @variable(model, p_to[keys(branches), T])
-    @variable(model, q_to[keys(branches), T])
-end
 
 
-function _add_convex_constraints!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}, node_voltages)
+function _add_convex_constraints!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}, node_vr, node_vi)
     """
     Adding the RHS approximation of the nodal voltages Vr_i and Vi_i
     These are the novelty of the Constante-Flores and Li 2026 work
+    Constraints 4b to 4j here
 
     * node_voltages is a dictionary that contains the mapping of the real and imaginary voltages for each node
     """
 
+    buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
+    @variable(model, xi_c[i in keys(buses),T] >= 0) # slack
+    @variable(model, xij_c[e in edges,T] >= 0) # slack
+    @variable(model, xij_s[e in edges,T] >= 0) # slack
+
+    for (i, bus) in buses
+        @constraint(model, [t in T], model[:c_ii][i, t] >= model[:vr][i,t]^2 + model[:vi][i,t]^2) #4b
+        @constraint(model, [t in T], model[:c_ii][i, t] <= 
+            2*(node_vr[i] * model[:vr][i,t] + node_vi[i] * model[:vi][i,t]) -
+            (node_vr[i]^2 + node_vi[i]^2) + xi_c[i,t]) #4c
+
+        @constraint(model, [t in T], model[:c_ii][i, t] <= 
+            2*(node_vr[i] * model[:vr][i,t] + node_vi[i] * model[:vi][i,t]) -
+            (node_vr[i]^2 + node_vi[i]^2) + xi_c[i,t]) #4b
+             
+    end
 
 
 end
