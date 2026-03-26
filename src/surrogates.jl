@@ -15,8 +15,8 @@ using .formulation
 Stores one solved instance of the convex AC OPF+UC problem.
 
 Fields:
-- `node_vr`: real voltage parameters used as the linearization point (input u)
-- `node_vi`: imaginary voltage parameters used as the linearization point (input u)
+- `node_vr`: real voltage parameters used as the linearization point (input ξ)
+- `node_vi`: imaginary voltage parameters used as the linearization point (input ξ)
 - `x_opt`: Dict of optimal variable values keyed by variable name
 - `status`: solver termination status string
 """
@@ -122,8 +122,8 @@ function sample_training_data(
     for d in 1:n_dims
         perm = randperm(n_samples)
         for s in 1:n_samples
-            u = (perm[s] - 1 + rand()) / n_samples   # uniform in stratum
-            lhs[s, d] = lb[d] + (ub[d] - lb[d]) * u
+            ξ_s = (perm[s] - 1 + rand()) / n_samples   # uniform sample within stratum
+            lhs[s, d] = lb[d] + (ub[d] - lb[d]) * ξ_s
         end
     end
 
@@ -175,14 +175,14 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    encode_u(point) -> Vector{Float32}
+    encode_ξ(point) -> Vector{Float32}
 
-Flatten `(node_vr, node_vi)` from a `TrainingDataPoint` into a 1-D input vector.
-Buses are ordered by numeric ID.
+Flatten `(node_vr, node_vi)` from a `TrainingDataPoint` into the 1-D surrogate
+input vector ξ. Buses are ordered by numeric ID.
 
 Layout: `[vr["1"], …, vr["n"], vi["1"], …, vi["n"]]`
 """
-function encode_u(point::TrainingDataPoint)::Vector{Float32}
+function encode_ξ(point::TrainingDataPoint)::Vector{Float32}
     bus_ids = sort(collect(keys(point.node_vr)), by=k -> parse(Int, k))
     return Float32[
         [point.node_vr[i] for i in bus_ids]...,
@@ -231,13 +231,14 @@ end
 """
     build_ffnn(input_dim, output_dim, hidden_dims; activation) -> Chain
 
-Build a feedforward neural network u → θ̂.
+Build a feedforward neural network ξ → θ̂.
 
-The FFNN predicts the linearization point θ = (node_vr, node_vi) for each bus,
-which defines the linear cuts A(u, θ)x ≤ B(u, θ) inside the convex OPF layer.
+The FFNN maps the surrogate input ξ = (node_vr, node_vi) to a predicted
+linearization point θ̂, which defines the linear cuts A(ξ, θ̂)x ≤ B(ξ, θ̂)
+inside the convex OPF layer.
 
 # Arguments
-- `input_dim::Int`: length of the encoded u vector (output of `encode_u`)
+- `input_dim::Int`: length of ξ (output of `encode_ξ`), equal to 2 * n_buses
 - `output_dim::Int`: 2 * n_buses  (predicted node_vr and node_vi for each bus)
 - `hidden_dims::Vector{Int}`: width of each hidden layer, e.g. `[64, 64]`
 - `activation`: activation applied to every hidden layer (default: `relu`)
@@ -247,7 +248,7 @@ The output layer is linear (no activation) so the network is unconstrained in ra
 # Example
 ```julia
 nn = build_ffnn(28, 28, [64, 64])   # case14: 28 inputs → 28 outputs (node_vr, node_vi)
-θ̂  = nn(encode_u(point))            # predicted linearization point
+θ̂  = nn(encode_ξ(point))            # predicted linearization point
 ```
 """
 function build_ffnn(
@@ -273,10 +274,10 @@ end
 # ARCHITECTURE
 # ============
 #
-#   u (node voltages)
+#   ξ (surrogate input: node voltages, encoded by encode_ξ)
 #     │
 #     ▼
-#   FFNN  (learned weights)
+#   FFNN  (learned weights W)
 #     │
 #     ▼  θ̂ = (node_vr_pred, node_vi_pred)   shape: 2 × n_buses
 #     │
@@ -286,13 +287,13 @@ end
 #     │                   - (θ̂_vr[i]² + θ̂_vi[i]²) + ξ_c[i]
 #     │    4d–4f: similar bilinear cuts for c_ij, s_ij
 #     │
-#     │  i.e.  A(u, θ̂) x ≤ B(u, θ̂)
+#     │  i.e.  A(ξ, θ̂) x ≤ B(ξ, θ̂)
 #     │
 #     ▼
-#   OPF LAYER  solve_convex_ac_uc(file, θ̂_vr, θ̂_vi)   [DiffOpt + ChainRules]
+#   OPF LAYER  build_diff_opf(file, θ̂_vr, θ̂_vi)   [DiffOpt + ChainRules]
 #     │
-#     ▼  x* = (vr*, vi*, pg*, u*, ...)   optimal solution under learned cuts
-#     │
+#     ▼  x* = (vr*, vi*, pg*, u_uc*, ...)   optimal solution under learned cuts
+#     │        note: u_uc is the unit commitment decision, distinct from ξ
 #     ▼
 #   LOSS  L(x*)   e.g. generation cost, or MSE vs a held-out solution
 #     │
@@ -356,9 +357,9 @@ end
 #
 # STEP 3 — end-to-end surrogate model
 #
-#   function surrogate_forward(u_vec, ffnn, file_name, bus_ids)
-#       # u_vec = encode_u(point)  →  shape: 2 * n_buses
-#       θ̂ = ffnn(u_vec)                        # FFNN predicts linearization point
+#   function surrogate_forward(ξ_vec, ffnn, file_name, bus_ids)
+#       # ξ_vec = encode_ξ(point)  →  shape: 2 * n_buses
+#       θ̂ = ffnn(ξ_vec)                        # FFNN predicts linearization point
 #       n = length(bus_ids)
 #       θ̂_vr = θ̂[1:n];  θ̂_vi = θ̂[n+1:end]   # split into vr / vi
 #       x_star = opf_layer(file_name, θ̂_vr, θ̂_vi)
@@ -368,12 +369,12 @@ end
 #
 # STEP 4 — training loop
 #
-#   loss(u_vec, x_true) = sum((surrogate_forward(u_vec, ffnn, ...) .- x_true).^2)
+#   loss(ξ_vec, x_true) = sum((surrogate_forward(ξ_vec, ffnn, ...) .- x_true).^2)
 #
 #   opt = Flux.setup(Adam(), ffnn)
-#   for (u_vec, x_true) in training_data
+#   for (ξ_vec, x_true) in training_data
 #       grads = Flux.gradient(ffnn) do nn
-#           loss(u_vec, x_true)    # gradient flows through OPF layer via rrule
+#           loss(ξ_vec, x_true)    # gradient flows through OPF layer via rrule
 #       end
 #       Flux.update!(opt, ffnn, grads)
 #   end

@@ -5,7 +5,7 @@ using JuMP, DiffOpt, Ipopt, Gurobi
 
 using PowerModels
 
-export convex_ac_uc, build_convex_ac_uc
+export convex_ac_uc, build_convex_ac_uc, build_diff_opf, ac_uc, mp_ac_uc
 """
 Here is where we will maintain the problem structure and the core functions to running this problem.
 """
@@ -196,6 +196,63 @@ function build_convex_ac_uc(file_path::String, node_vr, node_vi, node_pd=nothing
     return model
 end
 
+"""
+    build_diff_opf(file_path, θ̂_vr, θ̂_vi) -> JuMP.Model
+
+Differentiable version of `build_convex_ac_uc` for use as an OPF layer inside
+a neural network. The linearization point (node_vr, node_vi) is declared as
+DiffOpt `Parameter` variables so that `reverse_differentiate!` can return
+dL/d(node_vr) and dL/d(node_vi) after a backward pass.
+
+The unit commitment variables `u` are relaxed to [0,1] because DiffOpt
+requires a continuous, convex problem to form KKT conditions.
+
+# Arguments
+- `file_path`: path to the Matpower `.m` case file
+- `θ̂_vr`: predicted real voltage linearization point — Vector of length n_buses,
+           ordered by ascending numeric bus ID (matches `encode_u` convention)
+- `θ̂_vi`: predicted imaginary voltage linearization point — same ordering
+
+# Usage (in rrule)
+```julia
+model = build_diff_opf(file, θ̂_vr, θ̂_vi)
+optimize!(model)
+# seed dL/dx*, then:
+DiffOpt.reverse_differentiate!(model)
+dθ̂_vr = DiffOpt.get_reverse_parameter.(model, model[:node_vr])
+dθ̂_vi = DiffOpt.get_reverse_parameter.(model, model[:node_vi])
+```
+"""
+function build_diff_opf(file_path::String, θ̂_vr::Vector{Float64}, θ̂_vi::Vector{Float64})
+    data = _parse_file_data(file_path)
+    T = [1]
+
+    model = DiffOpt.diff_model(Gurobi.Optimizer)
+
+    # Bus IDs sorted ascending — must match the ordering used in encode_u
+    bus_ids = sort(collect(keys(data.buses)), by = k -> parse(Int, k))
+    @assert length(θ̂_vr) == length(bus_ids) && length(θ̂_vi) == length(bus_ids)
+
+    # Declare linearization point as DiffOpt Parameters.
+    # These become the cut coefficients A(u, θ̂) x ≤ B(u, θ̂) in _add_convex_constraints!
+    # DiffOpt tracks them through the KKT system so reverse_differentiate!
+    # can return dL/dθ̂ for the FFNN backward pass.
+    @variable(model, node_vr[bus_ids] in Parameter.(θ̂_vr))
+    @variable(model, node_vi[bus_ids] in Parameter.(θ̂_vi))
+
+    # Build variables — relax_binary=true so DiffOpt can form KKT conditions
+    _add_acuc_var_rectangular!(model, data, T, convex=true, relax_binary=true)
+    _add_convex_constraints!(model, data, T, node_vr, node_vi)
+
+    _add_mincost_obj!(model, data, T, convex=true)
+    _add_ref_limits_rectangular!(model, data, T)
+    _add_gen_limits!(model, data, T)
+    _add_rectangular_branchflow!(model, data, T)
+    _add_node_bal_rectangular!(model, data, T)
+
+    return model
+end
+
 function get_old_voltages(model::JuMP.Model, data::MatpowerData)
     node_vr = Dict()
     node_vi = Dict()
@@ -251,7 +308,7 @@ function _get_edges(data::MatpowerData)
     return edges
 end
 
-function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false)
+function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false, relax_binary::Bool=false)
     """
     Rectangular power voltage W-matrix style formulation
     """
@@ -273,7 +330,7 @@ function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Ve
 
     if !convex
         for (i, bus) in buses
-            @constraint(model, [t in T], model[:c_ii][i,t] == model[:vr][i,t]^2 + model[:vi][i,t]^2) #1l           
+            @constraint(model, [t in T], model[:c_ii][i,t] == model[:vr][i,t]^2 + model[:vi][i,t]^2) #1l
         end
 
         for (i,j) in edges
@@ -284,8 +341,12 @@ function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Ve
             @constraint(model, [t in T], model[:s_ij][e,t] == model[:vr][i,t]*model[:vi][j,t] - model[:vr][j,t]*model[:vi][i,t]) # 1n
         end
     end
-    
-    @variable(model, u[keys(gens), T], Bin) # UNIT COMMITMENT: Binary status
+
+    if relax_binary
+        @variable(model, 0 <= u[keys(gens), T] <= 1) # Relaxed unit commitment for DiffOpt
+    else
+        @variable(model, u[keys(gens), T], Bin) # UNIT COMMITMENT: Binary status
+    end
     @variable(model, pg[keys(gens), T])     # Active power generation
     @variable(model, qg[keys(gens), T])     # Reactive power generation
 
