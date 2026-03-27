@@ -31,7 +31,7 @@ end
 
 function ac_uc(file_path::String, type="Rectangular")
     if type == "Rectangular"
-        return build_single_period_ac_uc_rectangular(file_path)
+        return build_single_ac_uc_rectangular(file_path)
     else
         return build_single_period_ac_uc_polar(file_path)
     end
@@ -240,13 +240,15 @@ function build_diff_opf(file_path::String, θ̂_vr::Vector{Float64}, θ̂_vi::Ve
     @variable(model, node_vr[bus_ids] in Parameter.(θ̂_vr))
     @variable(model, node_vi[bus_ids] in Parameter.(θ̂_vi))
 
-    # Build variables — relax_binary=true so DiffOpt can form KKT conditions
-    _add_acuc_var_rectangular!(model, data, T, convex=true, relax_binary=true)
+    # UC decisions excluded — the OPF layer is a pure continuous convex QCQP.
+    # UC is a MIQCQP concern; the surrogate learns to approximate its solution
+    # via the linearization point θ̂ without re-introducing integer variables.
+    _add_acuc_var_rectangular!(model, data, T, convex=true, include_uc=false)
     _add_convex_constraints!(model, data, T, node_vr, node_vi)
 
-    _add_mincost_obj!(model, data, T, convex=true)
+    _add_mincost_obj!(model, data, T, convex=true, no_uc=true)
     _add_ref_limits_rectangular!(model, data, T)
-    _add_gen_limits!(model, data, T)
+    _add_continuous_gen_limits!(model, data, T)
     _add_rectangular_branchflow!(model, data, T)
     _add_node_bal_rectangular!(model, data, T)
 
@@ -308,7 +310,7 @@ function _get_edges(data::MatpowerData)
     return edges
 end
 
-function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false, relax_binary::Bool=false)
+function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false, relax_binary::Bool=false, include_uc::Bool=true)
     """
     Rectangular power voltage W-matrix style formulation
     """
@@ -342,10 +344,12 @@ function _add_acuc_var_rectangular!(model::JuMP.Model, data::MatpowerData, T::Ve
         end
     end
 
-    if relax_binary
-        @variable(model, 0 <= u[keys(gens), T] <= 1) # Relaxed unit commitment for DiffOpt
-    else
-        @variable(model, u[keys(gens), T], Bin) # UNIT COMMITMENT: Binary status
+    if include_uc
+        if relax_binary
+            @variable(model, 0 <= u[keys(gens), T] <= 1) # Relaxed unit commitment for DiffOpt
+        else
+            @variable(model, u[keys(gens), T], Bin) # UNIT COMMITMENT: Binary status
+        end
     end
     @variable(model, pg[keys(gens), T])     # Active power generation
     @variable(model, qg[keys(gens), T])     # Reactive power generation
@@ -409,26 +413,38 @@ function _add_convex_constraints!(model::JuMP.Model, data::MatpowerData, T::Vect
 
 end
 
-function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false)
+function _add_mincost_obj!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64}; convex::Bool=false, no_uc::Bool=false)
     """
-    Add min cost objective function for mp-ac-uc-opf
+    Add min cost objective function for mp-ac-uc-opf.
+    Set no_uc=true to exclude the no-load cost term (cost[3] * u) when UC
+    variables are not present in the model (e.g. build_diff_opf).
     """
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
     if convex
         edges = _get_edges(data)
-        @objective(model, Min, sum( sum(
-            gens[i]["cost"][1] * model[:pg][i, t]^2 + 
-            gens[i]["cost"][2] * model[:pg][i, t] + 
-            gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)) + sum(
-            model[:xi_c][i,t] for i in keys(buses)) + sum(model[:xij_c][e,t] + model[:xij_s][e,t]
-            for e in edges)
-            for t in T) 
-            )
+        if no_uc
+            @objective(model, Min, sum( sum(
+                gens[i]["cost"][1] * model[:pg][i, t]^2 +
+                gens[i]["cost"][2] * model[:pg][i, t] for i in keys(gens)) + sum(
+                model[:xi_c][i,t] for i in keys(buses)) + sum(model[:xij_c][e,t] + model[:xij_s][e,t]
+                for e in edges)
+                for t in T)
+                )
+        else
+            @objective(model, Min, sum( sum(
+                gens[i]["cost"][1] * model[:pg][i, t]^2 +
+                gens[i]["cost"][2] * model[:pg][i, t] +
+                gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)) + sum(
+                model[:xi_c][i,t] for i in keys(buses)) + sum(model[:xij_c][e,t] + model[:xij_s][e,t]
+                for e in edges)
+                for t in T)
+                )
+        end
     else
         @objective(model, Min, sum( sum(
-            gens[i]["cost"][1] * model[:pg][i, t]^2 + 
-            gens[i]["cost"][2] * model[:pg][i, t] + 
+            gens[i]["cost"][1] * model[:pg][i, t]^2 +
+            gens[i]["cost"][2] * model[:pg][i, t] +
             gens[i]["cost"][3] * model[:u][i, t] for i in keys(gens)
             ) for t in T))
     end
@@ -455,7 +471,7 @@ function _add_ref_limits_rectangular!(model::JuMP.Model, data::MatpowerData, T::
 end
 
 function _add_gen_limits!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
-    
+
     # _, gens, _, _ = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
@@ -465,6 +481,19 @@ function _add_gen_limits!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64
         @constraint(model, model[:pg][i,t] <= gen["pmax"] * model[:u][i,t])
         @constraint(model, model[:qg][i,t] >= gen["qmin"] * model[:u][i,t])
         @constraint(model, model[:qg][i,t] <= gen["qmax"] * model[:u][i,t])
+    end
+end
+
+function _add_continuous_gen_limits!(model::JuMP.Model, data::MatpowerData, T::Vector{Int64})
+    buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
+
+    # Simple generator bounds without UC coupling — used in build_diff_opf
+    # where u is excluded so the OPF layer is a pure continuous convex QCQP
+    for t in T, (i, gen) in gens
+        @constraint(model, model[:pg][i,t] >= gen["pmin"])
+        @constraint(model, model[:pg][i,t] <= gen["pmax"])
+        @constraint(model, model[:qg][i,t] >= gen["qmin"])
+        @constraint(model, model[:qg][i,t] <= gen["qmax"])
     end
 end
 

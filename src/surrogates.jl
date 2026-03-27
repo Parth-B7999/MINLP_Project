@@ -7,6 +7,8 @@ using JLD2
 using PowerModels
 using ProgressMeter
 using Random
+import ChainRulesCore
+import MathOptInterface as MOI
 
 include(joinpath(@__DIR__, "formulation.jl"))
 using .formulation
@@ -268,6 +270,39 @@ end
 
 
 # ---------------------------------------------------------------------------
+# ALTERNATIVE: Polynomial parameterization of θ̂ (Dixit 2025 style)
+# ---------------------------------------------------------------------------
+#
+# Instead of an FFNN, θ̂ = (node_vr, node_vi) can be parameterized as a
+# low-order polynomial in ξ, following Dixit et al. (2025):
+#
+#   θ̂_vr[i] = a_vr[i] + b_vr[i]·ξ_vr[i] + c_vr[i]·ξ_vr[i]²
+#   θ̂_vi[i] = a_vi[i] + b_vi[i]·ξ_vi[i] + c_vi[i]·ξ_vi[i]²
+#
+# Parameters: 3 × n_buses × 2 scalars (84 for case14).
+# Warm start: a = mean(ξ), b = 1, c = 0  (identity-like initialization).
+#
+# ADVANTAGES over FFNN:
+#   - Far fewer parameters, easier to train for POC
+#   - No Flux needed for the predictor itself
+#   - Directly comparable to Dixit for validation
+#   - Good for testing that the DiffOpt pipeline (rrule, reverse_differentiate!,
+#     training loop) is mechanically correct before committing to the FFNN
+#
+# WHY WE USE THE FFNN INSTEAD:
+#   - The MIQCQP solution x_true is DISCONTINUOUS in ξ — the unit commitment
+#     pattern (which generators are on/off) changes discretely as ξ varies.
+#     A smooth elementwise polynomial cannot represent these regime changes.
+#   - The polynomial maps bus i's input to bus i's θ̂ independently. It has
+#     no cross-bus interactions, so it cannot learn that bus i's voltage
+#     affects the optimal commitment at a distant generator.
+#   - The core claim of the surrogate — that a learned convex QCQP can
+#     replace the MIQCQP — requires capturing the combinatorial structure of
+#     unit commitment. That needs the expressive power of an FFNN.
+#
+# REVISIT as a debugging baseline if FFNN training has convergence issues.
+
+# ---------------------------------------------------------------------------
 # (3) Differentiable OPF layer + end-to-end surrogate
 # ---------------------------------------------------------------------------
 #
@@ -302,81 +337,200 @@ end
 
 
 # ---------------------------------------------------------------------------
-# PSEUDOCODE: differentiable OPF layer
+# STEP 1 — build_diff_opf  (implemented in formulation.jl)
 # ---------------------------------------------------------------------------
-#
-# The OPF layer wraps build_convex_ac_uc so that DiffOpt can differentiate
-# through it. The key change vs the current formulation is that node_vr and
-# node_vi are declared as Parameter variables (not plain numbers), so DiffOpt
-# tracks their sensitivity.
-#
-# STEP 1 — build a differentiable model
-#
-#   function build_diff_opf(file_name, θ̂_vr, θ̂_vi)
-#       model = DiffOpt.diff_model(Gurobi.Optimizer)
-#
-#       # Declare linearization point as DiffOpt Parameters
-#       @variable(model, node_vr[bus_ids] in Parameter.(θ̂_vr))
-#       @variable(model, node_vi[bus_ids] in Parameter.(θ̂_vi))
-#
-#       # Build the rest of the convex QCQP using node_vr / node_vi
-#       # as the cut coefficients  (A(u, θ) x ≤ B(u, θ))
-#       _add_acuc_var_rectangular!(model, data, T, convex=true)
-#       _add_convex_constraints!(model, data, T, node_vr, node_vi)
-#       _add_mincost_obj!(...)
-#       ...
-#       return model
-#   end
-#
-#
-# STEP 2 — define the solution map + rrule
-#
-#   function opf_layer(file_name, θ̂_vr, θ̂_vi)
-#       model = build_diff_opf(file_name, θ̂_vr, θ̂_vi)
-#       optimize!(model)
-#       return value.(model[:pg])   # or whichever outputs feed the loss
-#   end
-#
-#   function ChainRulesCore.rrule(::typeof(opf_layer), file_name, θ̂_vr, θ̂_vi)
-#       model = build_diff_opf(file_name, θ̂_vr, θ̂_vi)
-#       x_star = opf_layer(file_name, θ̂_vr, θ̂_vi; model=model)
-#
-#       function pullback_opf(dL_dx)
-#           # seed dL/dx* into DiffOpt
-#           DiffOpt.set_reverse_variable.(model, model[:pg], dL_dx)
-#           DiffOpt.reverse_differentiate!(model)
-#
-#           # retrieve dL/dθ̂  (flows back into FFNN)
-#           dθ̂_vr = DiffOpt.get_reverse_parameter.(model, model[:node_vr])
-#           dθ̂_vi = DiffOpt.get_reverse_parameter.(model, model[:node_vi])
-#           return (NoTangent(), NoTangent(), dθ̂_vr, dθ̂_vi)
-#       end
-#       return x_star, pullback_opf
-#   end
-#
-#
-# STEP 3 — end-to-end surrogate model
-#
-#   function surrogate_forward(ξ_vec, ffnn, file_name, bus_ids)
-#       # ξ_vec = encode_ξ(point)  →  shape: 2 * n_buses
-#       θ̂ = ffnn(ξ_vec)                        # FFNN predicts linearization point
-#       n = length(bus_ids)
-#       θ̂_vr = θ̂[1:n];  θ̂_vi = θ̂[n+1:end]   # split into vr / vi
-#       x_star = opf_layer(file_name, θ̂_vr, θ̂_vi)
-#       return x_star
-#   end
-#
-#
+# build_diff_opf(file_path, θ̂_vr, θ̂_vi) wraps the convex QCQP with
+# DiffOpt.diff_model and declares node_vr / node_vi as Parameter variables.
+# UC decisions are excluded; generator limits are simple continuous bounds.
+
+
+# ---------------------------------------------------------------------------
+# STEP 2 — opf_layer + rrule
+# ---------------------------------------------------------------------------
+
+"""
+    opf_layer(file_name, θ̂_vr, θ̂_vi; model) -> Vector{Float64}
+
+Solve the differentiable convex OPF given predicted linearization point θ̂.
+Returns optimal active power generation pg* as a Vector sorted by generator ID.
+
+Pass a pre-built `model` to avoid rebuilding — used inside the rrule to
+share the solved model with the pullback closure.
+"""
+function opf_layer(
+    file_name::String,
+    θ̂_vr::Vector{Float64},
+    θ̂_vi::Vector{Float64};
+    model::Union{JuMP.Model, Nothing} = nothing,
+)::Vector{Float64}
+    if isnothing(model)
+        model = build_diff_opf(file_name, θ̂_vr, θ̂_vi)
+    end
+    set_silent(model)
+    optimize!(model)
+
+    stat = termination_status(model)
+    if !(stat in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED))
+        error("opf_layer: solver returned $stat")
+    end
+
+    t = 1
+    gen_ids = sort(collect(axes(model[:pg], 1)), by = k -> parse(Int, k))
+    return Float64[value(model[:pg][g, t]) for g in gen_ids]
+end
+
+
+"""
+ChainRulesCore.rrule for opf_layer.
+
+Forward: build model, solve, return pg*.
+
+Pullback: receives dL/dpg* from the downstream loss, seeds it into DiffOpt,
+runs reverse_differentiate! to solve the KKT sensitivity system, then returns
+dL/dθ̂_vr and dL/dθ̂_vi — the gradients that flow back into the FFNN.
+"""
+function ChainRulesCore.rrule(
+    ::typeof(opf_layer),
+    file_name::String,
+    θ̂_vr::Vector{Float64},
+    θ̂_vi::Vector{Float64},
+)
+    model   = build_diff_opf(file_name, θ̂_vr, θ̂_vi)
+    pg_star = opf_layer(file_name, θ̂_vr, θ̂_vi; model = model)
+
+    function pullback_opf(dL_dpg)
+        t       = 1
+        gen_ids = sort(collect(axes(model[:pg],     1)), by = k -> parse(Int, k))
+        bus_ids = sort(collect(axes(model[:node_vr], 1)), by = k -> parse(Int, k))
+
+        # Clear any previously set sensitivities
+        DiffOpt.empty_input_sensitivities!(model)
+
+        # Seed dL/dpg* — one scalar per generator, ordered by gen ID
+        for (k, g) in enumerate(gen_ids)
+            DiffOpt.set_reverse_variable(model, model[:pg][g, t], dL_dpg[k])
+        end
+
+        # Solve the KKT sensitivity system through the OPF
+        DiffOpt.reverse_differentiate!(model)
+
+        # Retrieve dL/dθ̂ — gradients w.r.t. the linearization point Parameters
+        dθ̂_vr = [DiffOpt.get_reverse_parameter(model, model[:node_vr][i]) for i in bus_ids]
+        dθ̂_vi = [DiffOpt.get_reverse_parameter(model, model[:node_vi][i]) for i in bus_ids]
+
+        return (
+            ChainRulesCore.NoTangent(),  # ∂/∂(typeof(opf_layer))
+            ChainRulesCore.NoTangent(),  # ∂/∂file_name
+            dθ̂_vr,
+            dθ̂_vi,
+        )
+    end
+
+    return pg_star, pullback_opf
+end
+
+
+# ---------------------------------------------------------------------------
+# STEP 3 — end-to-end surrogate forward pass
+# ---------------------------------------------------------------------------
+
+"""
+    surrogate_forward(ξ_vec, ffnn, file_name, n_buses) -> Vector{Float64}
+
+Chain FFNN → OPF layer for a single input ξ.
+
+# Arguments
+- `ξ_vec::Vector{Float32}`: encoded input `[vr_1,...,vr_n, vi_1,...,vi_n]`
+- `ffnn::Chain`: Flux network mapping ξ → θ̂  (built with `build_ffnn`)
+- `file_name::String`: path to the Matpower `.m` case file
+- `n_buses::Int`: number of buses (used to split θ̂ into vr / vi)
+
+# Returns
+Optimal active power generation `pg*` as a `Vector{Float64}`, sorted by generator ID.
+This is differentiable end-to-end: Zygote traces through the FFNN, and the
+`rrule` for `opf_layer` handles the OPF sensitivity via DiffOpt.
+"""
+function surrogate_forward(
+    ξ_vec::Vector{Float32},
+    ffnn::Chain,
+    file_name::String,
+    n_buses::Int,
+)::Vector{Float64}
+    θ̂     = ffnn(ξ_vec)                     # FFNN: ξ → θ̂  (Float32)
+    θ̂_vr  = Float64.(θ̂[1:n_buses])          # split and promote for OPF layer
+    θ̂_vi  = Float64.(θ̂[n_buses+1:end])
+    return opf_layer(file_name, θ̂_vr, θ̂_vi) # → pg* via DiffOpt rrule
+end
+
+
+# ---------------------------------------------------------------------------
 # STEP 4 — training loop
-#
-#   loss(ξ_vec, x_true) = sum((surrogate_forward(ξ_vec, ffnn, ...) .- x_true).^2)
-#
-#   opt = Flux.setup(Adam(), ffnn)
-#   for (ξ_vec, x_true) in training_data
-#       grads = Flux.gradient(ffnn) do nn
-#           loss(ξ_vec, x_true)    # gradient flows through OPF layer via rrule
-#       end
-#       Flux.update!(opt, ffnn, grads)
-#   end
+# ---------------------------------------------------------------------------
+
+"""
+    train_surrogate!(ffnn, training_data, file_name, bus_ids, gen_ids;
+                     n_epochs, lr) -> Vector{Float64}
+
+Train `ffnn` end-to-end using MSE on active power generation as the task loss.
+
+Loss per sample:  L = ∑_g (pg*_g − pg_true_g)²
+
+Gradients flow:
+  dL/dpg* → [rrule] → dL/dθ̂ → [Zygote] → dL/dW_ffnn
+
+Failed solves in `training_data` (empty `x_opt`) are skipped.
+
+# Arguments
+- `ffnn::Chain`: surrogate network built with `build_ffnn`; mutated in-place
+- `training_data::Vector{TrainingDataPoint}`: output of `sample_training_data`
+- `file_name::String`: path to Matpower `.m` case file (passed to `opf_layer`)
+- `bus_ids::Vector{String}`: sorted bus IDs (determines ξ layout and θ̂ split)
+- `gen_ids::Vector{String}`: sorted generator IDs (determines pg* / pg_true layout)
+- `n_epochs::Int`: number of full passes over `training_data` (default: 10)
+- `lr::Float64`: Adam learning rate (default: 1e-3)
+
+# Returns
+`Vector{Float64}` of mean epoch losses (length `n_epochs`).
+"""
+function train_surrogate!(
+    ffnn::Chain,
+    training_data::Vector{TrainingDataPoint},
+    file_name::String,
+    bus_ids::Vector{String},
+    gen_ids::Vector{String};
+    n_epochs::Int   = 10,
+    lr::Float64     = 1e-3,
+)::Vector{Float64}
+    n_buses    = length(bus_ids)
+    opt_state  = Flux.setup(Flux.Adam(lr), ffnn)
+    epoch_losses = Float64[]
+
+    for epoch in 1:n_epochs
+        total_loss  = 0.0
+        n_valid     = 0
+
+        for point in training_data
+            isempty(point.x_opt) && continue   # skip failed solves
+
+            ξ_vec   = encode_ξ(point)
+            pg_true = Float64[point.x_opt["pg"][g] for g in gen_ids]
+
+            loss_val, grads = Flux.withgradient(ffnn) do nn
+                pg_pred = surrogate_forward(ξ_vec, nn, file_name, n_buses)
+                sum((pg_pred .- pg_true) .^ 2)
+            end
+
+            Flux.update!(opt_state, ffnn, grads[1])
+            total_loss += loss_val
+            n_valid    += 1
+        end
+
+        mean_loss = n_valid > 0 ? total_loss / n_valid : NaN
+        push!(epoch_losses, mean_loss)
+        println("Epoch $epoch/$n_epochs: mean loss = $mean_loss  ($n_valid samples)")
+    end
+
+    return epoch_losses
+end
 
 end
