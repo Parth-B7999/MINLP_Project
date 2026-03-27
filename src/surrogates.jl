@@ -231,26 +231,45 @@ end
 
 
 """
+    surrogate_output_dim(n_buses, n_gen, K) -> Int
+
+Compute the total FFNN output dimension for the surrogate model.
+
+Output vector layout (all entries are Float32, split in `surrogate_forward`):
+
+    [ θ̂_vr (n_buses) | θ̂_vi (n_buses) | α (K×n_gen) | β (K×n_gen) | γ (K) ]
+
+- θ̂_vr, θ̂_vi : linearization point for the convex cuts 4c–4f
+- α, β         : cut coefficients on pg and u  (column-major: all K cuts for
+                 generator 1, then generator 2, …)
+- γ            : cut right-hand sides
+
+Total: 2·n_buses + K·(2·n_gen + 1)
+"""
+surrogate_output_dim(n_buses::Int, n_gen::Int, K::Int) = 2*n_buses + K*(2*n_gen + 1)
+
+
+"""
     build_ffnn(input_dim, output_dim, hidden_dims; activation) -> Chain
 
-Build a feedforward neural network ξ → θ̂.
+Build a feedforward neural network ξ → (θ̂, α, β, γ).
 
-The FFNN maps the surrogate input ξ = (node_vr, node_vi) to a predicted
-linearization point θ̂, which defines the linear cuts A(ξ, θ̂)x ≤ B(ξ, θ̂)
-inside the convex OPF layer.
+Use `surrogate_output_dim(n_buses, n_gen, K)` to compute `output_dim`.
 
 # Arguments
-- `input_dim::Int`: length of ξ (output of `encode_ξ`), equal to 2 * n_buses
-- `output_dim::Int`: 2 * n_buses  (predicted node_vr and node_vi for each bus)
-- `hidden_dims::Vector{Int}`: width of each hidden layer, e.g. `[64, 64]`
-- `activation`: activation applied to every hidden layer (default: `relu`)
+- `input_dim::Int`: length of ξ = 2 * n_buses
+- `output_dim::Int`: use `surrogate_output_dim(n_buses, n_gen, K)`
+- `hidden_dims::Vector{Int}`: hidden layer widths, e.g. `[64, 64]`
+- `activation`: activation for hidden layers (default: `relu`)
 
-The output layer is linear (no activation) so the network is unconstrained in range.
+The output layer is linear so all outputs are unconstrained.
 
 # Example
 ```julia
-nn = build_ffnn(28, 28, [64, 64])   # case14: 28 inputs → 28 outputs (node_vr, node_vi)
-θ̂  = nn(encode_ξ(point))            # predicted linearization point
+# case14: 14 buses, 5 generators, 3 cuts
+K    = 3
+nn   = build_ffnn(28, surrogate_output_dim(14, 5, K), [64, 64])
+out  = nn(encode_ξ(point))   # length 28 + 3*(10+1) = 61
 ```
 """
 function build_ffnn(
@@ -360,11 +379,14 @@ share the solved model with the pullback closure.
 function opf_layer(
     file_name::String,
     θ̂_vr::Vector{Float64},
-    θ̂_vi::Vector{Float64};
+    θ̂_vi::Vector{Float64},
+    α::Union{Matrix{Float64}, Nothing} = nothing,
+    β::Union{Matrix{Float64}, Nothing} = nothing,
+    γ::Union{Vector{Float64}, Nothing} = nothing;
     model::Union{JuMP.Model, Nothing} = nothing,
 )::Vector{Float64}
     if isnothing(model)
-        model = build_diff_opf(file_name, θ̂_vr, θ̂_vi)
+        model = build_diff_opf(file_name, θ̂_vr, θ̂_vi; α=α, β=β, γ=γ)
     end
     set_silent(model)
     optimize!(model)
@@ -383,46 +405,76 @@ end
 """
 ChainRulesCore.rrule for opf_layer.
 
-Forward: build model, solve, return pg*.
+Forward: build model with linearization point (θ̂_vr, θ̂_vi) and optional
+learned cuts (α, β, γ) as DiffOpt Parameters, solve, return pg*.
 
-Pullback: receives dL/dpg* from the downstream loss, seeds it into DiffOpt,
-runs reverse_differentiate! to solve the KKT sensitivity system, then returns
-dL/dθ̂_vr and dL/dθ̂_vi — the gradients that flow back into the FFNN.
+Pullback: receives dL/dpg* from downstream, seeds it into DiffOpt, runs
+reverse_differentiate! to solve the KKT sensitivity system, then returns
+gradients w.r.t. all DiffOpt Parameters:
+  - dθ̂_vr, dθ̂_vi  : gradients for the linearization point
+  - dα, dβ, dγ      : gradients for the learned cut coefficients
+                       (NoTangent if cuts were not provided)
+
+All five gradient tensors flow back through Zygote into the FFNN weights.
 """
 function ChainRulesCore.rrule(
     ::typeof(opf_layer),
     file_name::String,
     θ̂_vr::Vector{Float64},
     θ̂_vi::Vector{Float64},
+    α::Union{Matrix{Float64}, Nothing},
+    β::Union{Matrix{Float64}, Nothing},
+    γ::Union{Vector{Float64}, Nothing},
 )
-    model   = build_diff_opf(file_name, θ̂_vr, θ̂_vi)
-    pg_star = opf_layer(file_name, θ̂_vr, θ̂_vi; model = model)
+    model   = build_diff_opf(file_name, θ̂_vr, θ̂_vi; α=α, β=β, γ=γ)
+    pg_star = opf_layer(file_name, θ̂_vr, θ̂_vi, α, β, γ; model=model)
 
     function pullback_opf(dL_dpg)
         t       = 1
-        gen_ids = sort(collect(axes(model[:pg],     1)), by = k -> parse(Int, k))
+        gen_ids = sort(collect(axes(model[:pg],      1)), by = k -> parse(Int, k))
         bus_ids = sort(collect(axes(model[:node_vr], 1)), by = k -> parse(Int, k))
 
-        # Clear any previously set sensitivities
         DiffOpt.empty_input_sensitivities!(model)
 
-        # Seed dL/dpg* — one scalar per generator, ordered by gen ID
+        # Seed dL/dpg* into DiffOpt
         for (k, g) in enumerate(gen_ids)
             DiffOpt.set_reverse_variable(model, model[:pg][g, t], dL_dpg[k])
         end
 
-        # Solve the KKT sensitivity system through the OPF
         DiffOpt.reverse_differentiate!(model)
 
-        # Retrieve dL/dθ̂ — gradients w.r.t. the linearization point Parameters
+        # Gradients for linearization point parameters
         dθ̂_vr = [DiffOpt.get_reverse_parameter(model, model[:node_vr][i]) for i in bus_ids]
         dθ̂_vi = [DiffOpt.get_reverse_parameter(model, model[:node_vi][i]) for i in bus_ids]
+
+        # Gradients for cut parameters (only if cuts were present in the model)
+        if !isnothing(α)
+            K       = size(α, 1)
+            cut_gen = sort(collect(axes(model[:α_cut], 2)), by = k -> parse(Int, k))
+            dα = Matrix{Float64}(undef, K, length(cut_gen))
+            dβ = Matrix{Float64}(undef, K, length(cut_gen))
+            dγ = Vector{Float64}(undef, K)
+            for k in 1:K
+                for (j, g) in enumerate(cut_gen)
+                    dα[k, j] = DiffOpt.get_reverse_parameter(model, model[:α_cut][k, g])
+                    dβ[k, j] = DiffOpt.get_reverse_parameter(model, model[:β_cut][k, g])
+                end
+                dγ[k] = DiffOpt.get_reverse_parameter(model, model[:γ_cut][k])
+            end
+        else
+            dα = ChainRulesCore.NoTangent()
+            dβ = ChainRulesCore.NoTangent()
+            dγ = ChainRulesCore.NoTangent()
+        end
 
         return (
             ChainRulesCore.NoTangent(),  # ∂/∂(typeof(opf_layer))
             ChainRulesCore.NoTangent(),  # ∂/∂file_name
             dθ̂_vr,
             dθ̂_vi,
+            dα,
+            dβ,
+            dγ,
         )
     end
 
@@ -435,31 +487,53 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    surrogate_forward(ξ_vec, ffnn, file_name, n_buses) -> Vector{Float64}
+    surrogate_forward(ξ_vec, ffnn, file_name, n_buses, n_gen, K) -> Vector{Float64}
 
 Chain FFNN → OPF layer for a single input ξ.
 
+Splits the flat FFNN output into (θ̂_vr, θ̂_vi, α, β, γ) and passes all five
+to `opf_layer`. Layout matches `surrogate_output_dim`:
+
+    out = ffnn(ξ_vec)   # length 2·n_buses + K·(2·n_gen + 1)
+    θ̂_vr = out[1 : n_buses]
+    θ̂_vi = out[n_buses+1 : 2·n_buses]
+    α    = reshape(out[2·n_buses+1         : 2·n_buses + K·n_gen],       K, n_gen)
+    β    = reshape(out[2·n_buses+K·n_gen+1 : 2·n_buses + 2·K·n_gen],    K, n_gen)
+    γ    = out[2·n_buses+2·K·n_gen+1 : end]
+
+α and β are reshaped column-major (Julia default): the first K elements of
+each flat block are all K cuts for generator 1, the next K for generator 2, etc.
+This matches the `_add_learned_cuts!` column ordering in formulation.jl.
+
 # Arguments
-- `ξ_vec::Vector{Float32}`: encoded input `[vr_1,...,vr_n, vi_1,...,vi_n]`
-- `ffnn::Chain`: Flux network mapping ξ → θ̂  (built with `build_ffnn`)
-- `file_name::String`: path to the Matpower `.m` case file
-- `n_buses::Int`: number of buses (used to split θ̂ into vr / vi)
+- `ξ_vec::Vector{Float32}`: encoded input from `encode_ξ`
+- `ffnn::Chain`: network built with `build_ffnn(..., surrogate_output_dim(...))`
+- `file_name::String`: path to Matpower `.m` case file
+- `n_buses::Int`: number of buses
+- `n_gen::Int`: number of generators
+- `K::Int`: number of learned cuts
 
 # Returns
-Optimal active power generation `pg*` as a `Vector{Float64}`, sorted by generator ID.
-This is differentiable end-to-end: Zygote traces through the FFNN, and the
-`rrule` for `opf_layer` handles the OPF sensitivity via DiffOpt.
+Optimal `pg*` as `Vector{Float64}`, sorted by generator ID.
 """
 function surrogate_forward(
     ξ_vec::Vector{Float32},
     ffnn::Chain,
     file_name::String,
     n_buses::Int,
+    n_gen::Int,
+    K::Int,
 )::Vector{Float64}
-    θ̂     = ffnn(ξ_vec)                     # FFNN: ξ → θ̂  (Float32)
-    θ̂_vr  = Float64.(θ̂[1:n_buses])          # split and promote for OPF layer
-    θ̂_vi  = Float64.(θ̂[n_buses+1:end])
-    return opf_layer(file_name, θ̂_vr, θ̂_vi) # → pg* via DiffOpt rrule
+    out  = ffnn(ξ_vec)
+    n_αβ = K * n_gen
+
+    θ̂_vr = Float64.(out[1:n_buses])
+    θ̂_vi = Float64.(out[n_buses+1:2*n_buses])
+    α    = Float64.(reshape(out[2*n_buses+1        : 2*n_buses+n_αβ],    K, n_gen))
+    β    = Float64.(reshape(out[2*n_buses+n_αβ+1   : 2*n_buses+2*n_αβ], K, n_gen))
+    γ    = Float64.(out[2*n_buses+2*n_αβ+1:end])
+
+    return opf_layer(file_name, θ̂_vr, θ̂_vi, α, β, γ)
 end
 
 
@@ -486,6 +560,7 @@ Failed solves in `training_data` (empty `x_opt`) are skipped.
 - `file_name::String`: path to Matpower `.m` case file (passed to `opf_layer`)
 - `bus_ids::Vector{String}`: sorted bus IDs (determines ξ layout and θ̂ split)
 - `gen_ids::Vector{String}`: sorted generator IDs (determines pg* / pg_true layout)
+- `K::Int`: number of learned cuts passed to `surrogate_forward` (default: 3)
 - `n_epochs::Int`: number of full passes over `training_data` (default: 10)
 - `lr::Float64`: Adam learning rate (default: 1e-3)
 
@@ -498,10 +573,12 @@ function train_surrogate!(
     file_name::String,
     bus_ids::Vector{String},
     gen_ids::Vector{String};
+    K::Int          = 3,
     n_epochs::Int   = 10,
     lr::Float64     = 1e-3,
 )::Vector{Float64}
     n_buses    = length(bus_ids)
+    n_gen      = length(gen_ids)
     opt_state  = Flux.setup(Flux.Adam(lr), ffnn)
     epoch_losses = Float64[]
 
@@ -516,7 +593,7 @@ function train_surrogate!(
             pg_true = Float64[point.x_opt["pg"][g] for g in gen_ids]
 
             loss_val, grads = Flux.withgradient(ffnn) do nn
-                pg_pred = surrogate_forward(ξ_vec, nn, file_name, n_buses)
+                pg_pred = surrogate_forward(ξ_vec, nn, file_name, n_buses, n_gen, K)
                 sum((pg_pred .- pg_true) .^ 2)
             end
 
