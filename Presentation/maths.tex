@@ -91,13 +91,14 @@
 \newcommand{\NSteps}{m}
 \newcommand{\Expect}[1]{\overline{#1}}
 \newcommand{\mean}{{\rm mean}}
+\newcommand{\Lagr}{\mathcal{L}}
 \usepackage{lineno}
 \linenumbers
 
 
 \begin{document}
 	
-\title{MINLP Project}
+\title{Decision-Focused NLP Surrogates for Convex MINLPs}
 
 \author{Parth Brahmbhatt, Kiernan Jennings\\
 	{\small Department of Chemical and Biological Engineering}\\
@@ -106,14 +107,28 @@
 \maketitle
 	
 	
-\section{Maths}
+\begin{abstract}	
+	Convex Mixed-Integer Nonlinear Programs (MINLPs) are crucial for modeling complex engineering and energy systems. However, solving them relies on computationally exhaustive branch-and-bound algorithms, making them largely unsuitable for real-time, online applications. Recent research has explored decision-focused surrogate modeling to accelerate combinatorial optimization, typically by formulating Linear Programming (LP) surrogates for Mixed-Integer Linear Programs (MILPs) [1] or large LPs [2] using bilevel programming. Concurrently, there have been significant advances in integrating differentiable optimization layers directly into machine learning pipelines [3]. However, a major gap remains in extending these techniques to nonlinear domains. Specifically, there is a distinct need to develop continuous Nonlinear Programming (NLP) surrogates for complex Mixed-Integer Nonlinear Programs (MINLPs) by learning the feasible region constraints in a decision-focused manner.
+	
+	This project will develop an end-to-end differentiable NLP surrogate to rapidly solve convex MINLPs. We will train a neural network to learn problem-specific constraints that guide the continuous relaxation, followed by a feasibility restoration step to quickly recover valid discrete decisions. To demonstrate the effectiveness and speed of this architecture, we will showcase a case study focusing on a hybrid vehicle control problem or a Unit Commitment AC Optimal Power Flow (UC-ACOPF) problem, formulated as a convex Mixed-Integer Quadratically Constrained Quadratic Program (MIQCQP) relaxation [4].
+	
+%	[1] Dixit, S., Gupta, R., & Zhang, Q. (2024). Decision-focused surrogate modeling for mixed-integer linear optimization. arXiv preprint arXiv:2406.05697.
+%	
+%	[2] Anrrango, A., Quisaguano, A., Constante-Flores, G. E., & Li, C. (2026). Self-Supervised Learning of Parametric Approximation for Security-Constrained DC-OPF. arXiv preprint arXiv:2601.13486.
+%	
+%	[3] Agrawal, A., Amos, B., Barratt, S., Boyd, S., Diamond, S., & Kolter, J. Z. (2019). Differentiable convex optimization layers. Advances in neural information processing systems, 32.
+%	
+%	[4] Constante-Flores, G., & Li, C. (2026). A quadratically-constrained convex approximation for the AC optimal power flow. Optimization and Engineering, 1-23.
+	
+\end{abstract}
+	
+\section{Concept}
 
 We are trying to learn the following convex MIQCQP:
 \begin{equation}
 	\begin{aligned}
 		P(u) = \quad & \min_{x} & & c(u)^\top x \\
 		& \text{s.t.} & & x^\top Q(u) x + R(u)^\top x \leq 0 \\
-		&&& Q(u) \succeq 0 \\
 		&&& x \in \mathbb{R}^m \times \mathbb{Z}^{n-m}	
 	\end{aligned}
 \end{equation}
@@ -125,12 +140,97 @@ Using the following surrogate convex QCQP:
 		\hat{P}(u,\theta) = \quad & \min_{x} & & c(u)^\top x \\
 		& \text{s.t.} & & x^\top Q(u) x + R(u)^\top x \leq 0 \\
 		&&& \tilde{A}(u, \theta) x \leq \tilde{b}(u, \theta) \\
-%		&&& x^\top \tilde{Q}(u,\theta) x + \tilde{R}(u,\theta)^\top x \leq 0 \\   
-		&&& Q(u) \succeq 0 \\
 		&&& x \in \mathbb{R}^n
 	\end{aligned}
 \end{equation}
 
+We are learning convex linearization points and linear cuts for the convex MIQCQP (UC-ACOPF) to produce a surrogate convex QCQP. In cases of infeasible integer solution points, we project the solution using $\ell_1$-norm minimization for feasibility restoration.
+
+\section{Preliminaries}
+Theory:
+\begin{equation}
+	\begin{aligned}
+		QP = \quad & \min_{x\in\mathbb{R}^n} & &\frac{1}{2} x^\top Q x + c^\top x \\
+		& \text{s.t.} & & Gx \leq h & (\lambda) \\
+		&&& Ax = b & (\mu) 
+	\end{aligned}
+\end{equation}
+
+QP KKT:
+\begin{equation}
+	\begin{aligned}
+		Qx + c +A^\top\mu + G^\top\lambda = 0 & & (\nabla \Lagr)\\
+		Ax=b && (P_{eq}) \\
+		\lambda_i (h-Gx)_i = 0 & \quad \forall i & (C) 
+	\end{aligned}
+\end{equation}
+Differentiate and translate to matrix form:
+\begin{equation}
+	\begin{bmatrix}
+		Q & G^\top & A^\top \\
+		D(\lambda)G & D(h - Gx) & 0 \\
+		A & 0 & 0
+	\end{bmatrix}
+	\begin{bmatrix}
+		dx \\
+		d\lambda \\
+		d\mu
+	\end{bmatrix}
+	= -
+	\begin{bmatrix}
+		dQ \, x + dc + dG^\top \lambda + dA^\top \mu \\
+		D(\lambda)dh - D(\lambda)dG \, x \\
+		dAx - db
+	\end{bmatrix},
+\end{equation}
+where $D(\cdot)$ is the diagonal matrix of a given vector.
+
+\section{Unit Commitment with Alternating Current Optimal Power Flow}
+The lifted rectangular coordinates formulation for the AC OPF problem,
+\begin{subequations}
+	\begin{align}
+		& \min_{\Xi} \sum_{k \in \mathcal{G}} C_k(p_k^{\text{g}}) \tag{1a} \\
+		& \text{subject to} \notag \\
+		& \sum_{k \in \mathcal{G}_i} p_k^{\text{g}} - P_i^{\text{d}} - G_i^{\text{sh}} c_{ii} = \sum_{(i,j) \in \mathcal{E}_i} p_{ij} + \sum_{(j,i) \in \mathcal{E}_i} p_{ji}, \forall i \in \mathcal{N}, \tag{1b} \\
+		& \sum_{k \in \mathcal{G}_i} q_k^{\text{g}} - Q_i^{\text{d}} + B_i^{\text{sh}} c_{ii} = \sum_{(i,j) \in \mathcal{E}_i} q_{ij} + \sum_{(j,i) \in \mathcal{E}_i} q_{ji}, \forall i \in \mathcal{N}, \tag{1c} \\
+		& p_{ij} = \frac{G_{ij}}{T_{ij}^2} c_{ii} - \frac{G_{ij}}{T_{ij}} c_{ij} + \frac{B_{ij}}{T_{ij}} s_{ij}, \forall (i, j) \in \mathcal{E}, \tag{1d} \\
+		& p_{ji} = G_{ij} c_{jj} - \frac{G_{ij}}{T_{ij}} c_{ij} - \frac{B_{ij}}{T_{ij}} s_{ij}, \forall (i, j) \in \mathcal{E}, \tag{1e} \\
+		& q_{ij} = -\frac{B_{ij} + B_{ij}^{\text{sh}}}{T_{ij}^2} c_{ii} + \frac{G_{ij}}{T_{ij}} s_{ij} + \frac{B_{ij}}{T_{ij}} c_{ij}, \forall (i, j) \in \mathcal{E}, \tag{1f} \\
+		& q_{ji} = -\left( B_{ij} + B_{ij}^{\text{sh}} \right) c_{jj} - \frac{G_{ij}}{T_{ij}} s_{ij} + \frac{B_{ij}}{T_{ij}} c_{ij}, \forall (i, j) \in \mathcal{E}, \tag{1g} \\
+		& (p_{ij})^2 + (q_{ij})^2 \leq \overline{S}_{ij}^2, \forall (i, j), (j, i) \in \mathcal{E}, \tag{1h} \\
+		& \underline{V}_i^2 \leq c_{ii} \leq \overline{V}_i^2, \forall i \in \mathcal{N}, \tag{1i} \\
+		& \underline{P}_k \leq p_k^{\text{g}} \leq \overline{P}_k, \forall k \in \mathcal{G}, \tag{1j} \\
+		& \underline{Q}_k \leq q_k^{\text{g}} \leq \overline{Q}_k, \forall k \in \mathcal{G}, \tag{1k} \\
+		& c_{ii} = (v_i^{\text{re}})^2 + (v_i^{\text{im}})^2, \forall i \in \mathcal{N}, \tag{1l} \\
+		& c_{ij} = v_i^{\text{re}} v_j^{\text{re}} + v_i^{\text{im}} v_j^{\text{im}}, \forall (i, j) \in \mathcal{E}, \tag{1m} \\
+		& s_{ij} = v_i^{\text{re}} v_j^{\text{im}} - v_j^{\text{re}} v_i^{\text{im}}, \forall (i, j) \in \mathcal{E}, \tag{1n}
+	\end{align}
+\end{subequations}
+
+Using Constante-Flores and Li 2026 convex formulation,
+\begin{subequations}
+	\begin{align}
+		& \min_{\Xi} \sum_{k \in \mathcal{G}} C_k(p_k^{\text{g}}) + \rho \left[ \sum_{i \in \mathcal{N}} \xi_i^c + \sum_{(i,j) \in \mathcal{E}} (\xi_{ij}^c + \xi_{ij}^s) \right] \\
+		& \text{subject to} \quad (1\text{b}) - (1\text{k}), \notag \\
+		& c_{ii} \geq (v_i^{\text{re}})^2 + (v_i^{\text{im}})^2, \forall i \in \mathcal{N} \\
+		& c_{ii} \leq 2 \left( V_i^{\text{re}} v_i^{\text{re}} + V_i^{\text{im}} v_i^{\text{im}} \right) - \left( (V_i^{\text{re}})^2 + (V_i^{\text{im}})^2 \right) + \xi_i^c, \forall i \in \mathcal{N}\\
+		& (v_i^{\text{re}} + v_j^{\text{re}})^2 + (v_i^{\text{im}} + v_j^{\text{im}})^2 - 4c_{ij} \leq \xi_{ij}^c + \notag \\
+		& \quad 2(v_i^{\text{re}} - v_j^{\text{re}})(V_i^{\text{re}} - V_j^{\text{re}}) + 2(v_i^{\text{im}} - v_j^{\text{im}})(V_i^{\text{im}} - V_j^{\text{im}}) - \notag \\
+		& \quad \left[ (V_i^{\text{re}} - V_j^{\text{re}})^2 + (V_i^{\text{im}} - V_j^{\text{im}})^2 \right], \forall (i, j) \in \mathcal{E}, \\
+		& (v_i^{\text{re}} - v_j^{\text{re}})^2 + (v_i^{\text{im}} - v_j^{\text{im}})^2 + 4c_{ij} \leq \xi_{ij}^c + \notag \\
+		& \quad 2(v_i^{\text{re}} + v_j^{\text{re}})(V_i^{\text{re}} + V_j^{\text{re}}) + 2(v_i^{\text{im}} + v_j^{\text{im}})(V_i^{\text{im}} + V_j^{\text{im}}) - \notag \\
+		& \quad \left[ (V_i^{\text{re}} + V_j^{\text{re}})^2 + (V_i^{\text{im}} + V_j^{\text{im}})^2 \right], \forall (i, j) \in \mathcal{E} \\
+		& (v_i^{\text{re}} - v_j^{\text{im}})^2 + (v_j^{\text{re}} + v_i^{\text{im}})^2 + 4s_{ij} \leq \xi_{ij}^s + \notag \\
+		& \quad 2(v_i^{\text{re}} + v_j^{\text{im}})(V_i^{\text{re}} + V_j^{\text{im}}) + 2(v_j^{\text{re}} - v_i^{\text{im}})(V_j^{\text{re}} - V_i^{\text{im}}) - \notag \\
+		& \quad \left[ (V_i^{\text{re}} + V_j^{\text{im}})^2 + (V_j^{\text{re}} - v_i^{\text{im}})^2 \right], \forall (i, j) \in \mathcal{E},\\
+		& (v_i^{\text{re}} + v_j^{\text{im}})^2 + (v_j^{\text{re}} - v_i^{\text{im}})^2 - 4s_{ij} \leq \xi_{ij}^s + \notag \\
+		& \quad 2(v_i^{\text{re}} - v_j^{\text{im}})(V_i^{\text{re}} - V_j^{\text{im}}) + 2(v_j^{\text{re}} + v_i^{\text{im}})(V_j^{\text{re}} + V_i^{\text{im}}) - \notag \\
+		& \quad \left[ (V_i^{\text{re}} - V_j^{\text{im}})^2 + (V_j^{\text{re}} + V_i^{\text{im}})^2 \right], \forall (i, j) \in \mathcal{E},  \\
+		& \xi_i^c \geq 0, \forall i \in \mathcal{N},\\
+		& \xi_{ij}^c \geq 0, \forall (i, j) \in \mathcal{E},  \\
+		& \xi_{ij}^s \geq 0, \forall (i, j) \in \mathcal{E},
+	\end{align}
+\end{subequations}
 
 
 \end{document}
