@@ -204,8 +204,9 @@ a neural network. The linearization point (node_vr, node_vi) is declared as
 DiffOpt `Parameter` variables so that `reverse_differentiate!` can return
 dL/d(node_vr) and dL/d(node_vi) after a backward pass.
 
-The unit commitment variables `u` are relaxed to [0,1] because DiffOpt
-requires a continuous, convex problem to form KKT conditions.
+Unit commitment variables `u` are relaxed to [0,1] (not binary). The
+coupling constraints pmin[g]·u[g] ≤ pg[g] ≤ pmax[g]·u[g] remain linear
+since pmin/pmax are scalar constants, so DiffOpt can form KKT conditions.
 
 # Arguments
 - `file_path`: path to the Matpower `.m` case file
@@ -223,34 +224,45 @@ dθ̂_vr = DiffOpt.get_reverse_parameter.(model, model[:node_vr])
 dθ̂_vi = DiffOpt.get_reverse_parameter.(model, model[:node_vi])
 ```
 """
-function build_diff_opf(file_path::String, θ̂_vr::Vector{Float64}, θ̂_vi::Vector{Float64})
+function build_diff_opf(
+    file_path::String,
+    θ̂_vr::Vector{Float64},
+    θ̂_vi::Vector{Float64};
+    α::Union{Matrix{Float64}, Nothing} = nothing,
+    β::Union{Matrix{Float64}, Nothing} = nothing,
+    γ::Union{Vector{Float64}, Nothing} = nothing,
+)
     data = _parse_file_data(file_path)
     T = [1]
 
     model = DiffOpt.diff_model(Gurobi.Optimizer)
 
-    # Bus IDs sorted ascending — must match the ordering used in encode_u
     bus_ids = sort(collect(keys(data.buses)), by = k -> parse(Int, k))
+    gen_ids = sort(collect(keys(data.gens)),  by = k -> parse(Int, k))
     @assert length(θ̂_vr) == length(bus_ids) && length(θ̂_vi) == length(bus_ids)
 
-    # Declare linearization point as DiffOpt Parameters.
-    # These become the cut coefficients A(u, θ̂) x ≤ B(u, θ̂) in _add_convex_constraints!
-    # DiffOpt tracks them through the KKT system so reverse_differentiate!
-    # can return dL/dθ̂ for the FFNN backward pass.
+    # Linearization point as DiffOpt Parameters — defines the convex cuts 4c–4f.
     @variable(model, node_vr[bus_ids] in Parameter.(θ̂_vr))
     @variable(model, node_vi[bus_ids] in Parameter.(θ̂_vi))
 
-    # UC decisions excluded — the OPF layer is a pure continuous convex QCQP.
-    # UC is a MIQCQP concern; the surrogate learns to approximate its solution
-    # via the linearization point θ̂ without re-introducing integer variables.
-    _add_acuc_var_rectangular!(model, data, T, convex=true, include_uc=false)
+    # u is included as a continuous [0,1] variable (binary relaxation).
+    # pmin[g] and pmax[g] are scalar constants, so the coupling constraints
+    # pmin[g]*u[g] ≤ pg[g] ≤ pmax[g]*u[g] are linear in (pg, u) — compatible
+    # with DiffOpt's KKT differentiation.
+    _add_acuc_var_rectangular!(model, data, T, convex=true, relax_binary=true)
     _add_convex_constraints!(model, data, T, node_vr, node_vi)
 
-    _add_mincost_obj!(model, data, T, convex=true, no_uc=true)
+    _add_mincost_obj!(model, data, T, convex=true)
     _add_ref_limits_rectangular!(model, data, T)
-    _add_continuous_gen_limits!(model, data, T)
+    _add_gen_limits!(model, data, T)
     _add_rectangular_branchflow!(model, data, T)
     _add_node_bal_rectangular!(model, data, T)
+
+    # Learned cuts on (pg, u): ∑_g [α[k,g]·pg[g] + β[k,g]·u[g]] ≤ γ[k]
+    # Only added when the FFNN has produced cut parameters (α, β, γ).
+    if !isnothing(α) && !isnothing(β) && !isnothing(γ)
+        _add_learned_cuts!(model, data, T, gen_ids, α, β, γ)
+    end
 
     return model
 end
@@ -621,6 +633,55 @@ function _add_node_bal_polar!(model::JuMP.Model, data::MatpowerData, demand_curv
         @constraint(model, 
             sum(model[:qg][g, t] for g in bus_gens; init=0.0) - qd + bs * model[:vm][i, t]^2 == 
             sum(model[:q_fr][b, t] for b in br_fr; init=0.0) + sum(model[:q_to][b, t] for b in br_to; init=0.0)
+        )
+    end
+end
+
+
+"""
+    _add_learned_cuts!(model, data, T, gen_ids, α, β, γ)
+
+Add K learned linear cuts on the joint (pg, u) space as DiffOpt Parameters.
+
+Each cut k takes the form:
+
+    ∑_g [ α[k,g]·pg[g,t] + β[k,g]·u[g,t] ] ≤ γ[k]
+
+α, β, γ are declared as `Parameter` variables so DiffOpt can return
+dL/dα, dL/dβ, dL/dγ via `reverse_differentiate!` for backprop into the FFNN.
+
+# Arguments
+- `gen_ids`: generator IDs sorted ascending — must match column ordering of α and β
+- `α::Matrix{Float64}`: K × n_gen cut coefficients on pg
+- `β::Matrix{Float64}`: K × n_gen cut coefficients on u
+- `γ::Vector{Float64}`: K right-hand side values
+"""
+function _add_learned_cuts!(
+    model::JuMP.Model,
+    data::MatpowerData,
+    T::Vector{Int64},
+    gen_ids::Vector{String},
+    α::Matrix{Float64},
+    β::Matrix{Float64},
+    γ::Vector{Float64},
+)
+    K     = length(γ)
+    n_gen = length(gen_ids)
+    @assert size(α) == (K, n_gen) "α must be K × n_gen, got $(size(α))"
+    @assert size(β) == (K, n_gen) "β must be K × n_gen, got $(size(β))"
+
+    # Declare cut coefficients as DiffOpt Parameters.
+    # α_cut[k, g] and β_cut[k, g] are indexed by cut index k and generator ID g.
+    # Julia arrays are column-major; JuMP iterates the DenseAxisArray in the same
+    # order, so α[k, col_idx] correctly maps to α_cut[k, gen_ids[col_idx]].
+    @variable(model, α_cut[1:K, gen_ids] in Parameter.(α))
+    @variable(model, β_cut[1:K, gen_ids] in Parameter.(β))
+    @variable(model, γ_cut[1:K] in Parameter.(γ))
+
+    for k in 1:K, t in T
+        @constraint(model,
+            sum(α_cut[k, g] * model[:pg][g, t] + β_cut[k, g] * model[:u][g, t]
+                for g in gen_ids) <= γ_cut[k]
         )
     end
 end

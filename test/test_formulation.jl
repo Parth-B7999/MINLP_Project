@@ -150,8 +150,13 @@ end
         @test haskey(model, :node_vi)
     end
 
-    @testset "UC variables excluded" begin
-        @test !haskey(model, :u)
+    @testset "UC variables relaxed to [0,1]" begin
+        @test haskey(model, :u)
+        for var in model[:u]
+            @test !is_binary(var)
+            @test has_lower_bound(var) && lower_bound(var) == 0.0
+            @test has_upper_bound(var) && upper_bound(var) == 1.0
+        end
     end
 
     @testset "node_vr and node_vi have correct dimensions" begin
