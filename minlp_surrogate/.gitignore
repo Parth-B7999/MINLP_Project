@@ -10,5 +10,6 @@ build/
 .venv
 env/
 venv/
+*.pt
 *.log
 gurobi.log
