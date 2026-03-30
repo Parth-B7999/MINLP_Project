@@ -1,5 +1,12 @@
 module surrogates
 
+export TrainingDataPoint
+export gather_training_data, sample_training_data
+export save_repertoire, load_repertoire
+export encode_ξ, encode_x
+export surrogate_output_dim, build_ffnn
+export opf_layer, surrogate_forward, train_surrogate!
+
 using DiffOpt
 using Flux
 using JuMP

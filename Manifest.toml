@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "071bdb9182c04580fc7140fff1066a63410b4b4b"
+project_hash = "b3862286ad37911d393171ded60aadeec1692d25"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -1358,9 +1358,9 @@ version = "0.1.2"
 
 [[deps.MathOptInterface]]
 deps = ["BenchmarkTools", "CodecBzip2", "CodecZlib", "ForwardDiff", "JSON", "LinearAlgebra", "MutableArithmetics", "NaNMath", "OrderedCollections", "PrecompileTools", "Printf", "SparseArrays", "SpecialFunctions", "Test"]
-git-tree-sha1 = "220a518968af92166a3e50c45f12569fcdf585ab"
+git-tree-sha1 = "ce739e3d8a21313ea418772edfc3b7b15a1dfc16"
 uuid = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
-version = "1.50.0"
+version = "1.50.1"
 
 [[deps.MathOptSetDistances]]
 deps = ["BlockDiagonals", "ChainRulesCore", "FillArrays", "LinearAlgebra", "MathOptInterface", "StaticArrays"]
