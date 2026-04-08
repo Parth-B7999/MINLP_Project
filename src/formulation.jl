@@ -687,7 +687,7 @@ function _add_learned_cuts!(
 end
 
 
-function _add_node_bal_rectangular!(model::JuMP.Model, data::MatpowerData, demand_curve::Vector{Int64}; param_loads=nothing)
+function _add_node_bal_rectangular!(model::JuMP.Model, data::MatpowerData, demand_curve::Vector{Float64}; param_loads=nothing)
     # buses, gens, branches, loads, shunts = _unpack_matpowerdata(data)
     buses, gens, branches, loads, shunts = (data.buses, data.gens, data.branches, data.loads, data.shunts)
 
