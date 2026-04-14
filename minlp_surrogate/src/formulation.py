@@ -1193,12 +1193,7 @@ def generate_training_data(
                       f"(Attempt {attempts}, {elapsed:.1f}s elapsed)")
         else:
             if not silent:
-                print(f"  Sample {s+1}: solver status {status} – skipped.")
-
-        if not silent and (s + 1) % 10 == 0:
-            elapsed = time.time() - t_start
-            print(f"  {s+1}/{n_samples} samples  ({elapsed:.1f}s elapsed, "
-                  f"{elapsed/(s+1):.2f}s/sample)")
+                print(f"  Attempt {attempts}: solver status {mdl.status} – skipped.")
 
     if not X_list:
         raise RuntimeError("No feasible samples generated. Check warm-start solution.")
