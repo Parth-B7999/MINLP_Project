@@ -31,6 +31,7 @@ Contains the models, source code, and data for exploring ACOPF (AC Optimal Power
 **Key Files:**
 - `DF_model_supervised.py`: Supervised decision-focused model implementation.
 - `DF_model_binary.py`: Model handling direct binary prediction setups.
+- `DF_model_unsupervised.ipynb`: Interactive Jupyter Notebook for the unsupervised differentiable surrogate model.
 - `src/`: Modular code containing the PyTorch model architectures (`model.py`, `model_binary.py`), CVXPY differentiable layers (`cvxpy_layer.py`), and physical formulations.
 - `data/`: ACOPF use cases (e.g., `case14.m`, `case300.m`).
 
