@@ -14,8 +14,7 @@ pip install -r requirements.txt
 Contains the experiments and datasets for evaluating differentiable MINLP surrogates on the hybrid electric vehicle control problem. 
 
 **Key Files:**
-- `run_hybrid_vehicle.py` / `.ipynb`: Main scripts to generate data, train the surrogate, and execute the complete experimental sweep comparing the Decision-Focused surrogate against Standard NN baselines.
-- `minlp_experiment_ready.ipynb`: Additional notebook for interactive experimentation.
+- `run_hybrid_vehicle.py`: Main scripts to generate data, train the surrogate, and execute the complete experimental sweep comparing the Decision-Focused surrogate against Standard NN baselines.
 
 **How to Run:**
 To execute the full benchmarking sweep (which tests over different constraint violation settings and neural network sizes):
@@ -23,7 +22,6 @@ To execute the full benchmarking sweep (which tests over different constraint vi
 cd Hybrid_Vehicle_Case_Study
 python run_hybrid_vehicle.py
 ```
-*Alternatively, you can open `run_hybrid_vehicle.ipynb` in Jupyter Notebook/Lab to run it interactively and visualize the plots step-by-step.*
 
 ## 2. ACOPF UC Case Study
 **Directory:** `ACOPF_UC_Case_Study/`
@@ -31,20 +29,20 @@ python run_hybrid_vehicle.py
 Contains the models, source code, and data for exploring ACOPF (AC Optimal Power Flow) Unit Commitment case studies using different levels of supervision.
 
 **Key Files:**
-- `run_acopf_unsupervised.py` / `.ipynb`: Unsupervised decision-focused model implementation.
-- `run_acopf_binary.py`: Model handling direct binary prediction setups.
+- `DF_model_supervised.py`: Supervised decision-focused model implementation.
+- `DF_model_binary.py`: Model handling direct binary prediction setups.
 - `src/`: Modular code containing the PyTorch model architectures (`model.py`, `model_binary.py`), CVXPY differentiable layers (`cvxpy_layer.py`), and physical formulations.
 - `data/`: ACOPF use cases (e.g., `case14.m`, `case300.m`).
 
 **How to Run:**
-To run the unsupervised differentiable optimization pipeline:
+To run the supervised differentiable optimization pipeline:
 ```bash
 cd ACOPF_UC_Case_Study
-python run_acopf_unsupervised.py
+python DF_model_supervised.py
 ```
 To run the binary variant of the surrogate model:
 ```bash
 cd ACOPF_UC_Case_Study
-python run_acopf_binary.py
+python DF_model_binary.py
 ```
-*You can also explore `run_acopf_unsupervised.ipynb` or `DF_model_5.ipynb` via Jupyter for detailed cell-by-cell analysis and outputs.*
+*You can also explore `DF_model_unsupervised.ipynb` via Jupyter for detailed cell-by-cell analysis and outputs.*
