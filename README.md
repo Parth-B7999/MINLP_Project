@@ -46,4 +46,3 @@ To run the binary variant of the surrogate model:
 cd ACOPF_UC_Case_Study
 python DF_model_binary.py
 ```
-*You can also explore `DF_model_unsupervised.ipynb` via Jupyter for detailed cell-by-cell analysis and outputs.*
